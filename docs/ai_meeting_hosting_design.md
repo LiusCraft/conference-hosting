@@ -321,4 +321,12 @@ Virtual Microphone
 
 - 已初始化 Cargo Workspace：`crates/host-core`、`crates/host-platform`、`apps/host-app-gpui`
 - 已提供 GPUI 最小可运行壳：`cargo run -p host-app-gpui`
-- 当前 `host-platform` 为平台适配占位层，后续承载设备枚举、采集和播放实现
+- 已在 `host-platform` 落地 WS 主链路基础实现：hello 握手、`listen` 控制、双向音频帧收发
+- 已在 `host-app-gpui` 落地消息可视化：WS 文本消息以聊天形式展示（含工具调用类文本事件）
+- 已在 `host-app-gpui` 支持文本输入（Enter 发送 `listen detect`）与 `cpal` 麦克风采集连续上行（20ms 分帧 Opus）
+- 已在 `host-app-gpui` 支持下行 Opus 解码并本地扬声器播放
+- 已在 `host-app-gpui` 支持输入/输出设备列表选择与 `BlackHole` 输出快捷切换（用于虚拟麦克风链路）
+- 已在 `host-app-gpui` 支持将输入源切换为输出回采（loopback）设备，用于采集会议软件下行声音
+- 已在 `host-app-gpui` 支持将所选输入源与输出源音频镜像到系统默认扬声器，便于本机监听
+- `host-app-gpui` 对下行音频二进制仅做统计，不转文本展示
+- 当前虚拟麦克风输出仍为下一阶段
