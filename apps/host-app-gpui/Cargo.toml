@@ -1,0 +1,11 @@
+[package]
+name = "host-app-gpui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+gpui.workspace = true
+host-core = { path = "../../crates/host-core" }
+host-platform = { path = "../../crates/host-platform" }

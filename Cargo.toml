@@ -1,0 +1,15 @@
+[workspace]
+members = [
+  "crates/host-core",
+  "crates/host-platform",
+  "apps/host-app-gpui",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+gpui = "0.2.2"

@@ -314,3 +314,11 @@ Virtual Microphone
 
 - 当前文档存在 `20ms + 16kHz + 16bit + mono` 与 `frame_size=320 bytes` 的口径冲突
 - 工程实现建议按 **320 samples / 640 bytes** 处理，并在联调时以服务端协议为准
+
+------------------------------------------------------------------------
+
+# 十四、工程脚手架落地状态（2026-03-05）
+
+- 已初始化 Cargo Workspace：`crates/host-core`、`crates/host-platform`、`apps/host-app-gpui`
+- 已提供 GPUI 最小可运行壳：`cargo run -p host-app-gpui`
+- 当前 `host-platform` 为平台适配占位层，后续承载设备枚举、采集和播放实现

@@ -1,0 +1,8 @@
+[package]
+name = "host-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+host-core = { path = "../host-core" }

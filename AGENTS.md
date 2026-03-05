@@ -7,11 +7,11 @@ Follow this before making any change.
 
 ## Repository Snapshot (as of 2026-03-05)
 
-- Repo currently contains design documentation only.
-- Primary content: `docs/ai_meeting_hosting_design.md`.
-- No application source tree detected (`src/`, `app/`, `server/`, etc.).
-- No build metadata detected (`package.json`, `pyproject.toml`, `go.mod`, `Cargo.toml`, `Makefile`).
-- No test folders or test runners detected.
+- Repo now contains design documentation and an initial Rust workspace scaffold.
+- Primary design doc: `docs/ai_meeting_hosting_design.md`.
+- Workspace root: `Cargo.toml`.
+- Workspace members: `crates/host-core`, `crates/host-platform`, `apps/host-app-gpui`.
+- GPUI shell entrypoint: `apps/host-app-gpui/src/main.rs`.
 
 ## Rule Files Check
 
@@ -34,27 +34,32 @@ If any of the above are added later, treat them as high-priority instructions an
 
 ## Build / Lint / Test Commands
 
-Current status: no build/lint/test toolchain is configured in this repository.
+Current status: Rust toolchain is configured through Cargo workspace.
+
+### Install dependencies
+
+- Command: `cargo fetch`
+- Notes: prefetches crate dependencies for faster first build.
 
 ### Build
 
-- Command: `N/A`
-- Notes: no build system detected.
+- Command: `cargo build --workspace`
+- Notes: builds all crates in the workspace.
 
 ### Lint
 
-- Command: `N/A`
-- Notes: no linter configuration detected.
+- Command: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings`
+- Notes: checks formatting and enforces zero clippy warnings.
 
 ### Test (all)
 
-- Command: `N/A`
-- Notes: no test runner or test files detected.
+- Command: `cargo test --workspace`
+- Notes: runs unit tests and doc tests for all workspace crates.
 
 ### Test (single test)
 
-- Command: `N/A`
-- Notes: single-test execution is not available until a test framework is added.
+- Command: `cargo test -p host-core gateway_status_toggle_switches_between_states`
+- Notes: concrete single-test example for quick verification.
 
 ## If You Introduce a Toolchain
 
