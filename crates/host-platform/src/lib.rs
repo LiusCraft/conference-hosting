@@ -1,5 +1,9 @@
 use host_core::GatewayStatus;
 
+mod ws_gateway;
+
+pub use ws_gateway::{WsGatewayClient, WsGatewayConfig, WsGatewayError, WsGatewayEvent};
+
 #[derive(Debug, Clone)]
 pub struct PlatformAdapter {
     status: GatewayStatus,
