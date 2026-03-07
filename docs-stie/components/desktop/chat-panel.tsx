@@ -191,15 +191,15 @@ export function ChatPanel({ connected }: ChatPanelProps) {
 
       {/* Input */}
       <div className="flex items-center gap-2 px-4 py-3 border-t border-border bg-card/30 shrink-0">
-        <div className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg bg-background border border-border focus-within:border-primary/50 transition-colors">
+        <div className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg bg-background border border-border focus-within:border-primary/70 focus-within:ring-1 focus-within:ring-primary/60 transition-[border-color,box-shadow]">
           <input
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleSend()}
             placeholder={connected ? "输入指令 (例: listen detect)" : "请先连接 WebSocket..."}
-            disabled={!connected}
-            className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/50 outline-none disabled:opacity-50 font-mono"
+            readOnly={!connected}
+            className="flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/50 outline-none caret-primary read-only:opacity-70 font-mono"
           />
           <kbd className="hidden sm:block text-[9px] text-muted-foreground/40 font-mono px-1 py-0.5 rounded border border-border/50">
             Enter
