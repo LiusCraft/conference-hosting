@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
@@ -25,7 +25,7 @@ use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::mpsc;
 
 const WINDOW_WIDTH: f32 = 1200.0;
-const WINDOW_HEIGHT: f32 = 700.0;
+const WINDOW_HEIGHT: f32 = 760.0;
 const MAX_CHAT_MESSAGES: usize = 240;
 const OPUS_BITRATE_BPS: i32 = 16_000;
 const OPUS_COMPLEXITY: i32 = 5;
@@ -40,6 +40,7 @@ const DEFAULT_TOKEN: &str = "your-token1";
 const HOST_INPUT_DEVICE_ENV: &str = "HOST_INPUT_DEVICE";
 const HOST_OUTPUT_DEVICE_ENV: &str = "HOST_OUTPUT_DEVICE";
 const CHAT_BOTTOM_EPSILON_PX: f32 = 2.0;
+const TTS_APPEND_REUSE_WINDOW_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectionState {
@@ -56,6 +57,7 @@ enum ChatRole {
     User,
     Assistant,
     Tool,
+    Trace,
     Error,
 }
 
@@ -64,6 +66,10 @@ struct ChatMessage {
     role: ChatRole,
     title: SharedString,
     body: SharedString,
+    created_at_unix_ms: u64,
+    response_latency_ms: Option<u64>,
+    trace_turn_key: Option<SharedString>,
+    trace_collapsed: bool,
 }
 
 #[derive(Debug)]
@@ -137,7 +143,11 @@ struct MeetingHostShell {
     show_output_dropdown: bool,
     show_settings_panel: bool,
     speaker_output_enabled: bool,
+    show_ai_emotion_messages: bool,
     chat_messages: Vec<ChatMessage>,
+    pending_detect_requests: VecDeque<Instant>,
+    active_tts_message_index: Option<usize>,
+    active_intent_trace_message_index: Option<usize>,
     follow_latest_chat_messages: bool,
     pending_chat_messages: usize,
 }
@@ -154,6 +164,9 @@ impl MeetingHostShell {
         self.connection_state = ConnectionState::Connecting;
         self.session_id = None;
         self.uplink_streaming = false;
+        self.pending_detect_requests.clear();
+        self.active_tts_message_index = None;
+        self.active_intent_trace_message_index = None;
         self.push_chat(
             ChatRole::System,
             "System",
@@ -268,6 +281,17 @@ impl MeetingHostShell {
         cx.notify();
     }
 
+    fn toggle_ai_emotion_messages(&mut self, cx: &mut Context<Self>) {
+        self.show_ai_emotion_messages = !self.show_ai_emotion_messages;
+        let state = if self.show_ai_emotion_messages {
+            "AI emotion placeholders are now visible"
+        } else {
+            "AI emotion placeholders are now hidden"
+        };
+        self.push_chat(ChatRole::System, "System", state);
+        cx.notify();
+    }
+
     fn input_level_percent(&self) -> usize {
         if !matches!(self.connection_state, ConnectionState::Connected) || !self.uplink_streaming {
             return 0;
@@ -359,6 +383,9 @@ impl MeetingHostShell {
 
         if command_tx.send(GatewayCommand::Disconnect).is_ok() {
             self.connection_state = ConnectionState::Disconnecting;
+            self.pending_detect_requests.clear();
+            self.active_tts_message_index = None;
+            self.active_intent_trace_message_index = None;
             self.push_chat(ChatRole::System, "System", "Disconnect requested");
         } else {
             self.push_chat(
@@ -371,6 +398,9 @@ impl MeetingHostShell {
             self.uplink_streaming = false;
             self.ws_command_tx = None;
             self.session_id = None;
+            self.pending_detect_requests.clear();
+            self.active_tts_message_index = None;
+            self.active_intent_trace_message_index = None;
         }
 
         cx.notify();
@@ -389,6 +419,8 @@ impl MeetingHostShell {
         }
 
         self.push_chat(ChatRole::User, "You", text.clone());
+        self.active_tts_message_index = None;
+        self.active_intent_trace_message_index = None;
         self.send_gateway_command(GatewayCommand::DetectText(text), cx);
         self.text_draft.clear();
         self.text_input_selected_range = 0..0;
@@ -475,8 +507,7 @@ impl MeetingHostShell {
 
     fn replace_text_draft_range(&mut self, range: Range<usize>, new_text: &str) {
         self.text_draft =
-            (self.text_draft[0..range.start].to_owned() + new_text + &self.text_draft[range.end..])
-                .into();
+            self.text_draft[0..range.start].to_owned() + new_text + &self.text_draft[range.end..];
 
         let cursor = range.start + new_text.len();
         self.set_text_cursor(cursor);
@@ -542,6 +573,8 @@ impl MeetingHostShell {
             return;
         }
 
+        let track_detect_request = matches!(&command, GatewayCommand::DetectText(_));
+
         let Some(command_tx) = self.ws_command_tx.as_ref() else {
             self.push_chat(
                 ChatRole::Error,
@@ -550,6 +583,9 @@ impl MeetingHostShell {
             );
             self.connection_state = ConnectionState::Idle;
             self.gateway_status = GatewayStatus::Idle;
+            self.pending_detect_requests.clear();
+            self.active_tts_message_index = None;
+            self.active_intent_trace_message_index = None;
             cx.notify();
             return;
         };
@@ -565,6 +601,11 @@ impl MeetingHostShell {
             self.uplink_streaming = false;
             self.ws_command_tx = None;
             self.session_id = None;
+            self.pending_detect_requests.clear();
+            self.active_tts_message_index = None;
+            self.active_intent_trace_message_index = None;
+        } else if track_detect_request {
+            self.pending_detect_requests.push_back(Instant::now());
         }
 
         cx.notify();
@@ -588,6 +629,9 @@ impl MeetingHostShell {
                 self.uplink_streaming = false;
                 self.ws_command_tx = None;
                 self.session_id = None;
+                self.pending_detect_requests.clear();
+                self.active_tts_message_index = None;
+                self.active_intent_trace_message_index = None;
                 self.push_chat(ChatRole::System, "System", "Gateway disconnected");
             }
             UiGatewayEvent::SystemNotice(message) => {
@@ -628,8 +672,276 @@ impl MeetingHostShell {
     }
 
     fn push_inbound_message(&mut self, message: InboundTextMessage) {
-        let (role, title, body) = describe_inbound_message(&message);
-        self.push_chat(role, title, body);
+        if self.handle_tts_inbound_message(&message) {
+            return;
+        }
+
+        if self.handle_llm_inbound_message(&message) {
+            return;
+        }
+
+        if self.handle_intent_trace_inbound_message(&message) {
+            return;
+        }
+
+        let Some((role, title, body)) = describe_inbound_message(&message) else {
+            return;
+        };
+
+        if role == ChatRole::Assistant && self.is_duplicate_assistant_message(body.as_str()) {
+            return;
+        }
+
+        let response_latency_ms = if role == ChatRole::Assistant {
+            self.consume_response_latency(&message)
+        } else {
+            None
+        };
+
+        self.push_chat_with_metadata(role, title, body, response_latency_ms);
+    }
+
+    fn handle_intent_trace_inbound_message(&mut self, message: &InboundTextMessage) -> bool {
+        if message.message_type != "notify" {
+            return false;
+        }
+
+        if read_string_field(&message.payload, "event") != Some("intent_trace") {
+            return false;
+        }
+
+        let trace_turn_key = extract_intent_trace_turn_key(&message.payload);
+        self.upsert_intent_trace_item(trace_turn_key.as_deref(), &message.payload);
+        true
+    }
+
+    fn upsert_intent_trace_item(&mut self, turn_key: Option<&str>, payload: &Map<String, Value>) {
+        if self.append_to_active_intent_trace_message(turn_key, payload) {
+            return;
+        }
+
+        let first_line = format_intent_trace_line(payload, 1);
+        self.push_chat_with_metadata(ChatRole::Trace, "调用链路", first_line, None);
+        if let Some(message) = self.chat_messages.first_mut() {
+            message.trace_turn_key = turn_key.map(|key| key.to_string().into());
+        }
+        self.active_intent_trace_message_index = Some(0);
+    }
+
+    fn append_to_active_intent_trace_message(
+        &mut self,
+        turn_key: Option<&str>,
+        payload: &Map<String, Value>,
+    ) -> bool {
+        let Some(index) = self.active_intent_trace_message_index else {
+            return false;
+        };
+
+        let Some(message) = self.chat_messages.get_mut(index) else {
+            self.active_intent_trace_message_index = None;
+            return false;
+        };
+
+        let message_turn_key = message.trace_turn_key.as_ref().map(SharedString::as_ref);
+        if message.role != ChatRole::Trace || !is_same_intent_trace_turn(message_turn_key, turn_key)
+        {
+            self.active_intent_trace_message_index = None;
+            return false;
+        }
+
+        let step_index = message
+            .body
+            .as_ref()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count()
+            .saturating_add(1);
+        let next_line = format_intent_trace_line(payload, step_index);
+        let updated_body = format!("{}\n{}", message.body, next_line);
+        message.body = updated_body.into();
+
+        if step_index == 2 && !message.trace_collapsed {
+            message.trace_collapsed = true;
+        }
+
+        if self.follow_latest_chat_messages {
+            self.chat_scroll.scroll_to_bottom();
+        }
+
+        true
+    }
+
+    fn handle_llm_inbound_message(&mut self, message: &InboundTextMessage) -> bool {
+        if message.message_type != "llm" {
+            return false;
+        }
+
+        let Some(text) = read_string_field(&message.payload, "text")
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        else {
+            return true;
+        };
+
+        if is_llm_emotion_placeholder(text) {
+            if !self.show_ai_emotion_messages || self.is_duplicate_assistant_message(text) {
+                return true;
+            }
+
+            self.push_chat(ChatRole::Assistant, "AI Emotion", text.to_string());
+            return true;
+        }
+
+        if self.is_duplicate_assistant_message(text) {
+            return true;
+        }
+
+        self.active_intent_trace_message_index = None;
+        let response_latency_ms = self.consume_response_latency(message);
+        self.push_chat_with_metadata(
+            ChatRole::Assistant,
+            "AI",
+            text.to_string(),
+            response_latency_ms,
+        );
+
+        true
+    }
+
+    fn handle_tts_inbound_message(&mut self, message: &InboundTextMessage) -> bool {
+        if message.message_type != "tts" {
+            return false;
+        }
+
+        let state = read_string_field(&message.payload, "state").unwrap_or("unknown");
+        match state {
+            "start" => {
+                self.active_tts_message_index = None;
+            }
+            "sentence_start" => {
+                let Some(text) = read_string_field(&message.payload, "text")
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                else {
+                    return true;
+                };
+
+                self.active_intent_trace_message_index = None;
+                let response_latency_ms = self.consume_response_latency(message);
+                self.upsert_tts_sentence_text(text, response_latency_ms);
+            }
+            "stop" => {
+                self.active_tts_message_index = None;
+                self.active_intent_trace_message_index = None;
+                if read_bool_field(&message.payload, "is_aborted") == Some(true) {
+                    self.push_chat(ChatRole::System, "System", "TTS playback aborted");
+                }
+            }
+            _ => {}
+        }
+
+        true
+    }
+
+    fn upsert_tts_sentence_text(&mut self, text: &str, response_latency_ms: Option<u64>) {
+        if self.append_to_active_tts_message(text, response_latency_ms) {
+            return;
+        }
+
+        let now_ms = unix_now_millis();
+        if let Some(latest_message) = self.chat_messages.first_mut() {
+            let message_is_recent = now_ms.saturating_sub(latest_message.created_at_unix_ms)
+                <= TTS_APPEND_REUSE_WINDOW_MS;
+            if latest_message.role == ChatRole::Assistant
+                && latest_message.title.as_ref() == "AI"
+                && message_is_recent
+            {
+                latest_message.body = text.to_string().into();
+                if latest_message.response_latency_ms.is_none() {
+                    latest_message.response_latency_ms = response_latency_ms;
+                }
+                self.active_tts_message_index = Some(0);
+                if self.follow_latest_chat_messages {
+                    self.chat_scroll.scroll_to_bottom();
+                }
+                return;
+            }
+        }
+
+        self.push_chat_with_metadata(
+            ChatRole::Assistant,
+            "AI",
+            text.to_string(),
+            response_latency_ms,
+        );
+        self.active_tts_message_index = Some(0);
+    }
+
+    fn append_to_active_tts_message(
+        &mut self,
+        text: &str,
+        response_latency_ms: Option<u64>,
+    ) -> bool {
+        let Some(index) = self.active_tts_message_index else {
+            return false;
+        };
+
+        let Some(message) = self.chat_messages.get_mut(index) else {
+            self.active_tts_message_index = None;
+            return false;
+        };
+
+        if message.role != ChatRole::Assistant || message.title.as_ref() != "AI" {
+            self.active_tts_message_index = None;
+            return false;
+        }
+
+        if !message.body.as_ref().ends_with(text) {
+            let mut merged = message.body.to_string();
+            merged.push_str(text);
+            message.body = merged.into();
+        }
+
+        if message.response_latency_ms.is_none() {
+            message.response_latency_ms = response_latency_ms;
+        }
+
+        if self.follow_latest_chat_messages {
+            self.chat_scroll.scroll_to_bottom();
+        }
+
+        true
+    }
+
+    fn consume_response_latency(&mut self, message: &InboundTextMessage) -> Option<u64> {
+        if !is_assistant_text_message(message) {
+            return None;
+        }
+
+        self.pending_detect_requests
+            .pop_front()
+            .map(|request_started_at| duration_to_millis(request_started_at.elapsed()))
+    }
+
+    fn is_duplicate_assistant_message(&self, body: &str) -> bool {
+        let Some(latest_message) = self.chat_messages.first() else {
+            return false;
+        };
+
+        latest_message.role == ChatRole::Assistant && latest_message.body.as_ref() == body
+    }
+
+    fn chat_message_header(&self, message: &ChatMessage) -> String {
+        let timestamp = format_message_timestamp(message.created_at_unix_ms);
+        match message.response_latency_ms {
+            Some(response_latency_ms) => format!(
+                "{} {} | {}",
+                message.title,
+                timestamp,
+                format_response_latency(response_latency_ms)
+            ),
+            None => format!("{} {}", message.title, timestamp),
+        }
     }
 
     fn is_chat_scrolled_to_bottom(&self) -> bool {
@@ -655,13 +967,54 @@ impl MeetingHostShell {
         cx.notify();
     }
 
+    fn toggle_trace_message_collapse(&mut self, message_index: usize, cx: &mut Context<Self>) {
+        let Some(message) = self.chat_messages.get_mut(message_index) else {
+            return;
+        };
+
+        if message.role != ChatRole::Trace {
+            return;
+        }
+
+        let step_count = message
+            .body
+            .as_ref()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        if step_count <= 1 {
+            return;
+        }
+
+        message.trace_collapsed = !message.trace_collapsed;
+        cx.notify();
+    }
+
     fn push_chat(
         &mut self,
         role: ChatRole,
         title: impl Into<SharedString>,
         body: impl Into<SharedString>,
     ) {
+        self.push_chat_with_metadata(role, title, body, None);
+    }
+
+    fn push_chat_with_metadata(
+        &mut self,
+        role: ChatRole,
+        title: impl Into<SharedString>,
+        body: impl Into<SharedString>,
+        response_latency_ms: Option<u64>,
+    ) {
         self.sync_chat_follow_state();
+
+        if let Some(index) = self.active_tts_message_index {
+            self.active_tts_message_index = index.checked_add(1);
+        }
+
+        if let Some(index) = self.active_intent_trace_message_index {
+            self.active_intent_trace_message_index = index.checked_add(1);
+        }
 
         self.chat_messages.insert(
             0,
@@ -669,11 +1022,27 @@ impl MeetingHostShell {
                 role,
                 title: title.into(),
                 body: body.into(),
+                created_at_unix_ms: unix_now_millis(),
+                response_latency_ms,
+                trace_turn_key: None,
+                trace_collapsed: false,
             },
         );
 
         if self.chat_messages.len() > MAX_CHAT_MESSAGES {
             self.chat_messages.truncate(MAX_CHAT_MESSAGES);
+        }
+
+        if let Some(index) = self.active_tts_message_index {
+            if index >= self.chat_messages.len() {
+                self.active_tts_message_index = None;
+            }
+        }
+
+        if let Some(index) = self.active_intent_trace_message_index {
+            if index >= self.chat_messages.len() {
+                self.active_intent_trace_message_index = None;
+            }
         }
 
         if self.follow_latest_chat_messages {
@@ -684,7 +1053,14 @@ impl MeetingHostShell {
         }
     }
 
-    fn render_chat_message(&self, message: &ChatMessage) -> impl IntoElement {
+    fn render_chat_message(
+        &self,
+        message_index: usize,
+        message: &ChatMessage,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let header = self.chat_message_header(message);
+
         match message.role {
             ChatRole::System => div().flex().justify_center().py_1().child(
                 div()
@@ -698,7 +1074,7 @@ impl MeetingHostShell {
                         div()
                             .text_xs()
                             .text_color(rgb(0x6f7c90))
-                            .child(format!("{} | {}", message.title, message.body)),
+                            .child(format!("{} | {}", header, message.body)),
                     ),
             ),
             ChatRole::Tool => div().flex().min_w_0().px_4().py_1().gap_2().child(
@@ -720,9 +1096,109 @@ impl MeetingHostShell {
                             .text_xs()
                             .text_color(rgb(0x7f8899))
                             .whitespace_normal()
-                            .child(message.title.clone()),
+                            .child(header.clone()),
                     ),
             ),
+            ChatRole::Trace => {
+                let trace_lines: Vec<SharedString> = message
+                    .body
+                    .as_ref()
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(|line| line.to_string().into())
+                    .collect();
+                let trace_step_count = trace_lines.len();
+                let is_collapsible = trace_step_count > 1;
+                let is_collapsed = is_collapsible && message.trace_collapsed;
+                let trace_preview = trace_lines.last().cloned();
+
+                let mut trace_content = div().flex().flex_col().min_w_0().flex_1().gap_1().child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0xe0b24f))
+                        .whitespace_normal()
+                        .child(header.clone()),
+                );
+
+                if is_collapsed {
+                    trace_content = trace_content
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0xe8d8b0))
+                                .whitespace_normal()
+                                .child(format!("本轮共 {} 次工具调用", trace_step_count)),
+                        )
+                        .children(trace_preview.map(|preview| {
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0xc4b389))
+                                .whitespace_normal()
+                                .child(preview)
+                        }));
+                } else {
+                    trace_content = trace_content.children(trace_lines.into_iter().map(|line| {
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xe8d8b0))
+                            .whitespace_normal()
+                            .child(line)
+                    }));
+                }
+
+                if is_collapsible {
+                    trace_content = trace_content.child(
+                        div()
+                            .id(("toggle-trace-message", message_index))
+                            .mt_1()
+                            .h_7()
+                            .px_3()
+                            .rounded_md()
+                            .border_1()
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .border_color(rgb(0x5d4a1c))
+                            .bg(rgb(0x1b180b))
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0xe7c87d))
+                            .child(if is_collapsed {
+                                "展开调用详情"
+                            } else {
+                                "收起调用详情"
+                            })
+                            .on_click(cx.listener(move |view, _event, _window, cx| {
+                                view.toggle_trace_message_collapse(message_index, cx)
+                            })),
+                    );
+                }
+
+                div()
+                    .flex()
+                    .min_w_0()
+                    .items_start()
+                    .gap_2()
+                    .px_4()
+                    .py_2()
+                    .child(
+                        div()
+                            .size_6()
+                            .rounded_md()
+                            .bg(rgb(0x1d1a08))
+                            .border_1()
+                            .border_color(rgb(0x8a6b1a))
+                            .text_xs()
+                            .text_color(rgb(0xf5c76f))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child("TL"),
+                    )
+                    .child(trace_content)
+            }
             ChatRole::Assistant => div()
                 .flex()
                 .min_w_0()
@@ -756,7 +1232,7 @@ impl MeetingHostShell {
                                 .text_xs()
                                 .text_color(rgb(0x14b8a6))
                                 .whitespace_normal()
-                                .child(message.title.clone()),
+                                .child(header.clone()),
                         )
                         .child(
                             div()
@@ -799,7 +1275,7 @@ impl MeetingHostShell {
                                 .text_xs()
                                 .text_color(rgb(0x8b93a3))
                                 .whitespace_normal()
-                                .child(message.title.clone()),
+                                .child(header.clone()),
                         )
                         .child(
                             div()
@@ -842,7 +1318,7 @@ impl MeetingHostShell {
                                 .text_xs()
                                 .text_color(rgb(0xfda4af))
                                 .whitespace_normal()
-                                .child(message.title.clone()),
+                                .child(header),
                         )
                         .child(
                             div()
@@ -1533,12 +2009,17 @@ impl Render for MeetingHostShell {
                     .child("暂无消息，连接后会显示实时会话记录。"),
             );
         } else {
-            message_stream = message_stream.children(
-                self.chat_messages
-                    .iter()
-                    .rev()
-                    .map(|message| self.render_chat_message(message)),
-            );
+            message_stream =
+                message_stream.children(self.chat_messages.iter().rev().enumerate().map(
+                    |(display_index, message)| {
+                        let message_index = self
+                            .chat_messages
+                            .len()
+                            .saturating_sub(display_index)
+                            .saturating_sub(1);
+                        self.render_chat_message(message_index, message, cx)
+                    },
+                ));
         }
 
         let mut message_stream_panel = div()
@@ -1915,6 +2396,86 @@ impl Render for MeetingHostShell {
                                         .text_sm()
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(rgb(0xdce4f3))
+                                        .child("会话显示"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(rgb(0x1d283a))
+                                        .bg(rgb(0x101726))
+                                        .px_3()
+                                        .py_2()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .gap_0p5()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(rgb(0xd7e0f0))
+                                                        .child("显示 AI 情绪占位消息"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgb(0x7d8aa0))
+                                                        .child("当 llm 只返回 emoji 等情绪符号时，是否展示在会话列表"),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("toggle-ai-emotion-messages")
+                                                .h_8()
+                                                .px_3()
+                                                .rounded_md()
+                                                .border_1()
+                                                .cursor_pointer()
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .border_color(if self.show_ai_emotion_messages {
+                                                    rgb(0x165e55)
+                                                } else {
+                                                    rgb(0x36445a)
+                                                })
+                                                .bg(if self.show_ai_emotion_messages {
+                                                    rgb(0x0c3f3b)
+                                                } else {
+                                                    rgb(0x131b2a)
+                                                })
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(if self.show_ai_emotion_messages {
+                                                    rgb(0x6af3e2)
+                                                } else {
+                                                    rgb(0x9aa6ba)
+                                                })
+                                                .child(if self.show_ai_emotion_messages {
+                                                    "显示中"
+                                                } else {
+                                                    "已隐藏"
+                                                })
+                                                .on_click(cx.listener(|view, _event, _window, cx| {
+                                                    view.toggle_ai_emotion_messages(cx)
+                                                })),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(0xdce4f3))
                                         .child("工程信息"),
                                 )
                                 .child(
@@ -2044,8 +2605,7 @@ impl EntityInputHandler for MeetingHostShell {
             .unwrap_or_else(|| self.text_input_selected_range.clone());
 
         self.text_draft =
-            (self.text_draft[0..range.start].to_owned() + new_text + &self.text_draft[range.end..])
-                .into();
+            self.text_draft[0..range.start].to_owned() + new_text + &self.text_draft[range.end..];
 
         if !new_text.is_empty() {
             self.text_input_marked_range = Some(range.start..range.start + new_text.len());
@@ -2142,105 +2702,37 @@ fn setting_row(label: impl Into<SharedString>, value: impl Into<SharedString>) -
 }
 
 fn wall_clock_label() -> String {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        % 86_400;
-    let hour = elapsed / 3_600;
-    let minute = (elapsed % 3_600) / 60;
-    let second = elapsed % 60;
-    format!("{hour:02}:{minute:02}:{second:02}")
+    let now = utc_datetime_parts_from_millis(unix_now_millis());
+    format_hms(now.3, now.4, now.5)
 }
 
-fn seed_mock_chat_messages() -> Vec<ChatMessage> {
-    vec![
-        ChatMessage {
-            role: ChatRole::Assistant,
-            title: "AI 14:25:08 | 9.8s".into(),
-            body: "建议把执行拆成三条线并行：内容生产、投放优化、转化闭环。每周做一次复盘，把预算从低 ROI 渠道挪到高 ROI 渠道。".into(),
-        },
-        ChatMessage {
-            role: ChatRole::User,
-            title: "STT 14:25:02".into(),
-            body: "那我们每周复盘时，核心看哪些看板数据？".into(),
-        },
-        ChatMessage {
-            role: ChatRole::Tool,
-            title: "14:24:56".into(),
-            body: "function_call: build_weekly_dashboard({\"metrics\": [\"CPL\", \"CVR\", \"Retention\", \"ROI\"]})".into(),
-        },
-        ChatMessage {
-            role: ChatRole::Assistant,
-            title: "AI 14:24:51 | 6.7s".into(),
-            body: "可以先把线索成本、转化率、7 日留存和渠道 ROI 放到同一张周报中，方便一眼比较渠道效率。".into(),
-        },
-        ChatMessage {
-            role: ChatRole::User,
-            title: "STT 14:24:47".into(),
-            body: "明白了，那执行上我们先从哪一块开始？".into(),
-        },
-        ChatMessage {
-            role: ChatRole::User,
-            title: "STT 14:24:30".into(),
-            body: "好的，这些指标看起来可行。我们接下来讨论一下时间节点。".into(),
-        },
-        ChatMessage {
-            role: ChatRole::Assistant,
-            title: "AI 14:24:06 | 15.1s".into(),
-            body: "核心 KPI 建议如下：第一，新增获客成本控制在 45 元以下；第二，短视频平台的自然流量增长目标 30%；第三，用户留存率从当前的 62% 提升到 70%；第四，ROI 整体目标不低于 3.5 倍。".into(),
-        },
-        ChatMessage {
-            role: ChatRole::Tool,
-            title: "14:24:03".into(),
-            body: "function_call: get_kpi_template({\"domain\": \"digital_marketing\", \"quarter\": \"Q2\"})".into(),
-        },
-        ChatMessage {
-            role: ChatRole::User,
-            title: "STT 14:24:02".into(),
-            body: "那关于 KPI 的设定呢？我们需要设定哪些关键指标？".into(),
-        },
-        ChatMessage {
-            role: ChatRole::Assistant,
-            title: "AI 14:23:38 | 12.5s".into(),
-            body: "建议将总预算的 40% 分配给短视频平台，包括抖音和视频号。25% 用于搜索引擎优化，20% 用于邮件营销自动化升级，剩余 15% 作为 A/B 测试预算。".into(),
-        },
-        ChatMessage {
-            role: ChatRole::User,
-            title: "STT 14:23:35".into(),
-            body: "这个建议不错，你能详细说一下具体的预算分配吗？".into(),
-        },
-        ChatMessage {
-            role: ChatRole::Assistant,
-            title: "AI 14:23:18 | 8.2s".into(),
-            body: "好的，我来做一些补充。根据第一季度的数据，我们在社交媒体渠道的转化率提升了 23%，建议第二季度加大在短视频平台的投入。".into(),
-        },
-        ChatMessage {
-            role: ChatRole::Tool,
-            title: "14:23:16".into(),
-            body: "function_call: analyze_context({\"topic\": \"Q2 marketing strategy\", \"participants\": 4})".into(),
-        },
-        ChatMessage {
-            role: ChatRole::User,
-            title: "STT 14:23:15".into(),
-            body: "大家好，今天我们来讨论一下第二季度的营销策略。".into(),
-        },
-        ChatMessage {
-            role: ChatRole::System,
-            title: "System 14:23:02".into(),
-            body: "开始音频采集: BlackHole 2ch (Loopback)".into(),
-        },
-        ChatMessage {
-            role: ChatRole::System,
-            title: "System 14:23:01".into(),
-            body: "hello 握手成功 | PCM 16kHz Mono 16bit 20ms".into(),
-        },
-        ChatMessage {
-            role: ChatRole::System,
-            title: "System 14:23:01".into(),
-            body: "WebSocket 连接已建立".into(),
-        },
-    ]
+fn load_history_chat_messages() -> Vec<ChatMessage> {
+    let mut chat_messages = Vec::new();
+
+    let persisted_history_records: Vec<ChatMessage> = Vec::new();
+    insert_history_chat_messages(&mut chat_messages, persisted_history_records);
+
+    chat_messages
+}
+
+fn insert_history_chat_messages(
+    chat_messages: &mut Vec<ChatMessage>,
+    mut history_messages: Vec<ChatMessage>,
+) {
+    if history_messages.is_empty() {
+        return;
+    }
+
+    history_messages.sort_unstable_by_key(|message| message.created_at_unix_ms);
+    history_messages.reverse();
+
+    chat_messages.extend(history_messages);
+    chat_messages
+        .sort_unstable_by(|left, right| right.created_at_unix_ms.cmp(&left.created_at_unix_ms));
+
+    if chat_messages.len() > MAX_CHAT_MESSAGES {
+        chat_messages.truncate(MAX_CHAT_MESSAGES);
+    }
 }
 
 fn main() {
@@ -2283,7 +2775,11 @@ fn main() {
                     show_output_dropdown: false,
                     show_settings_panel: false,
                     speaker_output_enabled: true,
-                    chat_messages: seed_mock_chat_messages(),
+                    show_ai_emotion_messages: false,
+                    chat_messages: load_history_chat_messages(),
+                    pending_detect_requests: VecDeque::new(),
+                    active_tts_message_index: None,
+                    active_intent_trace_message_index: None,
                     follow_latest_chat_messages: true,
                     pending_chat_messages: 0,
                 })
@@ -2594,7 +3090,8 @@ fn spawn_gateway_worker(
                     config.device_name.clone(),
                     config.device_mac.clone(),
                     config.token.clone(),
-                ))),
+                )
+                .with_intent_trace_notify(true))),
             });
 
             let mut client = match WsGatewayClient::connect(config).await {
@@ -3468,67 +3965,160 @@ fn pcm16_to_float(sample: i16) -> f32 {
     (sample as f32 / i16::MAX as f32).clamp(-1.0, 1.0)
 }
 
-fn describe_inbound_message(message: &InboundTextMessage) -> (ChatRole, String, String) {
+fn describe_inbound_message(message: &InboundTextMessage) -> Option<(ChatRole, String, String)> {
     match message.message_type.as_str() {
-        "hello" => {
-            let session_id = read_string_field(&message.payload, "session_id").unwrap_or("-");
-            (
-                ChatRole::System,
-                "Server hello".to_string(),
-                format!("session_id={session_id}"),
-            )
-        }
-        "stt" => (
-            ChatRole::User,
-            "STT".to_string(),
-            read_string_field(&message.payload, "text")
-                .unwrap_or("(empty stt text)")
-                .to_string(),
-        ),
-        "llm" => (
-            ChatRole::Assistant,
-            "LLM".to_string(),
-            read_string_field(&message.payload, "text")
-                .unwrap_or("(empty llm text)")
-                .to_string(),
-        ),
-        "tts" => {
-            let state = read_string_field(&message.payload, "state").unwrap_or("unknown");
-            let text = read_string_field(&message.payload, "text").unwrap_or("");
-            let body = if text.is_empty() {
-                format!("state={state}")
-            } else {
-                format!("state={state}, text={text}")
-            };
-            (ChatRole::Assistant, "TTS".to_string(), body)
-        }
-        "mcp" => (
+        "hello" => None,
+        "stt" => read_string_field(&message.payload, "text")
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(|text| (ChatRole::User, "STT".to_string(), text.to_string())),
+        "llm" | "tts" => None,
+        "audio" => None,
+        "mcp" => Some((
             ChatRole::Tool,
             "Tool Call".to_string(),
             summarize_tool_message(&message.payload),
-        ),
+        )),
         "notify" => {
             let event_name = read_string_field(&message.payload, "event").unwrap_or("notify");
             if event_name == "intent_trace" {
-                (
-                    ChatRole::Tool,
-                    "Intent Trace".to_string(),
-                    summarize_intent_trace(&message.payload),
-                )
+                None
             } else {
-                (
+                Some((
                     ChatRole::System,
                     "Notify".to_string(),
                     compact_json(&Value::Object(message.payload.clone())),
-                )
+                ))
             }
         }
-        _ => (
+        _ => Some((
             ChatRole::System,
             format!("Server {}", message.message_type),
             compact_json(&Value::Object(message.payload.clone())),
-        ),
+        )),
     }
+}
+
+fn is_assistant_text_message(message: &InboundTextMessage) -> bool {
+    match message.message_type.as_str() {
+        "llm" => read_string_field(&message.payload, "text")
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(|text| !is_llm_emotion_placeholder(text))
+            .unwrap_or(false),
+        "tts" => {
+            read_string_field(&message.payload, "state") == Some("sentence_start")
+                && read_string_field(&message.payload, "text")
+                    .map(str::trim)
+                    .map(|text| !text.is_empty())
+                    .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+fn is_llm_emotion_placeholder(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let mut has_emoji = false;
+    let mut emoji_unit_count = 0usize;
+
+    for ch in trimmed.chars() {
+        if ch.is_whitespace() {
+            continue;
+        }
+
+        if !is_emoji_component(ch) {
+            return false;
+        }
+
+        if ch != '\u{200d}' && ch != '\u{fe0f}' {
+            emoji_unit_count = emoji_unit_count.saturating_add(1);
+        }
+
+        if (ch as u32) != 0xfe0f && (ch as u32) != 0x200d {
+            has_emoji = true;
+        }
+
+        if emoji_unit_count > 8 {
+            return false;
+        }
+    }
+
+    has_emoji && emoji_unit_count > 0
+}
+
+fn is_emoji_component(ch: char) -> bool {
+    let code_point = ch as u32;
+    matches!(
+        code_point,
+        0x1f300..=0x1faff
+            | 0x2600..=0x27bf
+            | 0x1f1e6..=0x1f1ff
+            | 0xfe0f
+            | 0x200d
+    )
+}
+
+fn extract_intent_trace_turn_key(payload: &Map<String, Value>) -> Option<String> {
+    payload.get("turn_id").and_then(|turn_id| match turn_id {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            (!trimmed.is_empty()).then(|| format!("turn:{trimmed}"))
+        }
+        Value::Number(number) => number
+            .as_u64()
+            .map(|value| format!("turn:{value}"))
+            .or_else(|| {
+                number
+                    .as_i64()
+                    .filter(|value| *value >= 0)
+                    .map(|value| format!("turn:{value}"))
+            }),
+        _ => None,
+    })
+}
+
+fn is_same_intent_trace_turn(current_turn: Option<&str>, incoming_turn: Option<&str>) -> bool {
+    match (current_turn, incoming_turn) {
+        (Some(current), Some(incoming)) => current == incoming,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn format_intent_trace_line(payload: &Map<String, Value>, step_index: usize) -> String {
+    let tool = read_string_field(payload, "tool").unwrap_or("unknown_tool");
+    let status = read_string_field(payload, "status").unwrap_or("unknown");
+    let source = read_string_field(payload, "source").unwrap_or("-");
+
+    let mut line = format!("{step_index}. [{status}] {tool}");
+    if source != "-" {
+        line.push_str(&format!(" ({source})"));
+    }
+
+    if let Some(error_value) = payload.get("error").filter(|value| !value.is_null()) {
+        let error_text = clamp_intent_trace_field(&compact_json(error_value), 88);
+        line.push_str(&format!(" | error={error_text}"));
+    } else if let Some(result_value) = payload.get("result").filter(|value| !value.is_null()) {
+        let result_text = clamp_intent_trace_field(&compact_json(result_value), 88);
+        line.push_str(&format!(" | result={result_text}"));
+    }
+
+    line
+}
+
+fn clamp_intent_trace_field(text: &str, max_chars: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.to_string();
+    }
+
+    let truncated: String = text.chars().take(max_chars).collect();
+    format!("{truncated}...")
 }
 
 fn summarize_tool_message(payload: &Map<String, Value>) -> String {
@@ -3553,33 +4143,89 @@ fn summarize_tool_message(payload: &Map<String, Value>) -> String {
     compact_json(inner_payload)
 }
 
-fn summarize_intent_trace(payload: &Map<String, Value>) -> String {
-    let tool = read_string_field(payload, "tool").unwrap_or("-");
-    let status = read_string_field(payload, "status").unwrap_or("-");
-    let source = read_string_field(payload, "source").unwrap_or("-");
-
-    let result_text = payload
-        .get("result")
-        .map(compact_json)
-        .unwrap_or_else(|| "null".to_string());
-
-    let error_text = payload
-        .get("error")
-        .map(compact_json)
-        .unwrap_or_else(|| "null".to_string());
-
-    format!(
-        "tool={}, status={}, source={}, result={}, error={}",
-        tool, status, source, result_text, error_text
-    )
-}
-
 fn read_string_field<'a>(payload: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     payload.get(key).and_then(Value::as_str)
 }
 
+fn read_bool_field(payload: &Map<String, Value>, key: &str) -> Option<bool> {
+    payload.get(key).and_then(Value::as_bool)
+}
+
 fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| format!("{value:?}"))
+}
+
+fn unix_now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(duration_to_millis)
+        .unwrap_or_default()
+}
+
+fn duration_to_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn utc_datetime_parts_from_millis(timestamp_ms: u64) -> (i32, u32, u32, u32, u32, u32) {
+    let total_seconds = timestamp_ms / 1_000;
+    let days_since_epoch = total_seconds / 86_400;
+    let seconds_of_day = u32::try_from(total_seconds % 86_400).unwrap_or_default();
+    let (year, month, day) =
+        utc_date_from_days(i64::try_from(days_since_epoch).unwrap_or(i64::MAX));
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+
+    (year, month, day, hour, minute, second)
+}
+
+fn utc_date_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    let adjusted_year = year + if month <= 2 { 1 } else { 0 };
+
+    (
+        i32::try_from(adjusted_year).unwrap_or(i32::MAX),
+        u32::try_from(month).unwrap_or(1),
+        u32::try_from(day).unwrap_or(1),
+    )
+}
+
+fn format_hms(hour: u32, minute: u32, second: u32) -> String {
+    format!("{hour:02}:{minute:02}:{second:02}")
+}
+
+fn format_message_timestamp(timestamp_ms: u64) -> String {
+    let now = utc_datetime_parts_from_millis(unix_now_millis());
+    let timestamp = utc_datetime_parts_from_millis(timestamp_ms);
+
+    if (timestamp.0, timestamp.1, timestamp.2) == (now.0, now.1, now.2) {
+        format_hms(timestamp.3, timestamp.4, timestamp.5)
+    } else {
+        format!(
+            "{:04}-{:02}-{:02} {}",
+            timestamp.0,
+            timestamp.1,
+            timestamp.2,
+            format_hms(timestamp.3, timestamp.4, timestamp.5)
+        )
+    }
+}
+
+fn format_response_latency(response_latency_ms: u64) -> String {
+    if response_latency_ms < 1_000 {
+        format!("{response_latency_ms}ms")
+    } else {
+        format!("{:.1}s", response_latency_ms as f64 / 1_000.0)
+    }
 }
 
 fn to_pretty_json<T: serde::Serialize>(value: &T) -> String {
