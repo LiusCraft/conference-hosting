@@ -81,9 +81,9 @@ Protocol-Version: 1
 
 示例
 
-{ "type": "hello", "version": 1, "transport": "websocket",
-"audio_params": { "format": "pcm", "sample_rate": 16000, "channels": 1,
-"bit_depth": 16, "frame_duration": 20, "frame_size": 320 } }
+{ "type": "hello", "device_id": "<device_id>", "device_name": "<device_name>",
+"device_mac": "<device_mac>", "token": "<token>", "features": { "notify":
+{ "intent_trace": true } } }
 
 推荐音频参数
 
@@ -99,7 +99,7 @@ Mono\
 
 音频格式
 
-PCM 16bit\
+采集侧 PCM 16bit\
 16000Hz\
 Mono
 
@@ -109,7 +109,8 @@ Mono
 
 对应大小
 
-320 bytes
+320 samples（PCM16 Mono）\
+640 bytes（PCM16 Mono）
 
 发送频率
 
@@ -117,7 +118,8 @@ Mono
 
 发送方式
 
-WebSocket Binary Frame
+上行：PCM 分帧后编码为 Opus，再通过 WebSocket Binary Frame 发送\
+下行：服务端返回 Opus Binary Packet，客户端解码后播放
 
 ------------------------------------------------------------------------
 
@@ -129,15 +131,15 @@ WebSocket Binary Frame
 
 ## TTS音频数据
 
-Binary Audio Stream
+Opus Binary Audio Stream
 
 客户端处理流程
 
-接收音频\
+接收 Opus 音频\
 ↓\
 缓存\
 ↓\
-解码\
+Opus 解码\
 ↓\
 音频播放器\
 ↓\
@@ -312,8 +314,8 @@ Virtual Microphone
 
 ## 协议实现备注
 
-- 当前文档存在 `20ms + 16kHz + 16bit + mono` 与 `frame_size=320 bytes` 的口径冲突
-- 工程实现建议按 **320 samples / 640 bytes** 处理，并在联调时以服务端协议为准
+- 当前实现统一按 **20ms / 16kHz / mono / PCM16 = 320 samples / 640 bytes** 作为采集分帧口径
+- 传输层统一使用 WebSocket Binary + Opus 编解码，并在联调时以服务端协议版本为准
 
 ------------------------------------------------------------------------
 

@@ -1,44 +1,30 @@
 use std::collections::VecDeque;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, Stream};
+use gateway_runtime::{
+    load_audio_device_state, spawn_gateway_worker, COMMAND_CHANNEL_CAPACITY, EVENT_CHANNEL_CAPACITY,
+};
 use gpui::{
     canvas, div, prelude::*, px, rgb, rgba, size, Animation, AnimationExt as _, App, Application,
     Bounds, Context, ElementInputHandler, EntityInputHandler, FocusHandle, FontWeight,
     KeyDownEvent, ScrollHandle, SharedString, UTF16Selection, Window, WindowBounds, WindowOptions,
 };
-use host_core::{
-    ClientTextMessage, GatewayStatus, HelloMessage, InboundTextMessage, AUDIO_FRAME_SAMPLES,
-    AUDIO_SAMPLE_RATE_HZ,
-};
-use host_platform::{WsGatewayClient, WsGatewayConfig, WsGatewayEvent};
-use opus::{
-    Application as OpusApplication, Bitrate as OpusBitrate, Channels as OpusChannels,
-    Decoder as OpusDecoder, Encoder as OpusEncoder,
-};
+use host_core::{GatewayStatus, InboundTextMessage, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE_HZ};
+use host_platform::WsGatewayConfig;
 use serde_json::{Map, Value};
-use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::mpsc;
+
+mod gateway_runtime;
 
 const WINDOW_WIDTH: f32 = 1200.0;
 const WINDOW_HEIGHT: f32 = 760.0;
 const MAX_CHAT_MESSAGES: usize = 240;
-const OPUS_BITRATE_BPS: i32 = 16_000;
-const OPUS_COMPLEXITY: i32 = 5;
-const OPUS_MAX_PACKET_BYTES: usize = 4000;
-const OPUS_DECODE_MAX_SAMPLES: usize = 4096;
-const DOWNLINK_BUFFER_SECONDS: usize = 2;
 const DEFAULT_WS_URL: &str = "wss://xrobo-io.qiniuapi.com/v1/ws/";
 const DEFAULT_DEVICE_MAC: &str = "unknown-device";
 const DEFAULT_DEVICE_NAME: &str = "host-user";
 const DEFAULT_CLIENT_ID: &str = "resvpu932";
 const DEFAULT_TOKEN: &str = "your-token1";
-const HOST_INPUT_DEVICE_ENV: &str = "HOST_INPUT_DEVICE";
-const HOST_OUTPUT_DEVICE_ENV: &str = "HOST_OUTPUT_DEVICE";
 const CHAT_BOTTOM_EPSILON_PX: f32 = 2.0;
 const TTS_APPEND_REUSE_WINDOW_MS: u64 = 5_000;
 
@@ -78,6 +64,7 @@ enum GatewayCommand {
     DetectText(String),
     StartUplinkStream,
     StopUplinkStream,
+    SetSpeakerOutputEnabled(bool),
 }
 
 #[derive(Debug)]
@@ -98,6 +85,7 @@ struct AudioRoutingConfig {
     input_device_name: Option<String>,
     input_from_output: bool,
     output_device_name: Option<String>,
+    speaker_output_enabled: bool,
 }
 
 impl AudioRoutingConfig {
@@ -125,7 +113,7 @@ struct MeetingHostShell {
     uplink_streaming: bool,
     downlink_audio_frames: usize,
     downlink_audio_bytes: usize,
-    ws_command_tx: Option<mpsc::UnboundedSender<GatewayCommand>>,
+    ws_command_tx: Option<mpsc::Sender<GatewayCommand>>,
     text_draft: String,
     text_input_selected_range: Range<usize>,
     text_input_selection_reversed: bool,
@@ -182,8 +170,8 @@ impl MeetingHostShell {
             ),
         );
 
-        let (command_tx, command_rx) = mpsc::unbounded_channel();
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (command_tx, command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
 
         spawn_gateway_worker(config, audio_routing, command_rx, event_tx);
 
@@ -209,6 +197,7 @@ impl MeetingHostShell {
             input_device_name: self.selected_input_device_name_raw().map(ToOwned::to_owned),
             input_from_output: self.input_from_output,
             output_device_name: self.selected_output_device_name().map(ToOwned::to_owned),
+            speaker_output_enabled: self.speaker_output_enabled,
         }
     }
 
@@ -273,10 +262,28 @@ impl MeetingHostShell {
     fn toggle_speaker_output(&mut self, cx: &mut Context<Self>) {
         self.speaker_output_enabled = !self.speaker_output_enabled;
         let state = if self.speaker_output_enabled {
-            "Output monitoring enabled"
+            "Output playback enabled"
         } else {
-            "Output monitoring paused"
+            "Output playback paused"
         };
+
+        if matches!(self.connection_state, ConnectionState::Connected) {
+            if let Some(command_tx) = self.ws_command_tx.as_ref() {
+                if command_tx
+                    .try_send(GatewayCommand::SetSpeakerOutputEnabled(
+                        self.speaker_output_enabled,
+                    ))
+                    .is_err()
+                {
+                    self.push_chat(
+                        ChatRole::Error,
+                        "Error",
+                        "Failed to sync output playback switch to gateway worker",
+                    );
+                }
+            }
+        }
+
         self.push_chat(ChatRole::System, "System", state);
         cx.notify();
     }
@@ -381,26 +388,36 @@ impl MeetingHostShell {
             return;
         };
 
-        if command_tx.send(GatewayCommand::Disconnect).is_ok() {
-            self.connection_state = ConnectionState::Disconnecting;
-            self.pending_detect_requests.clear();
-            self.active_tts_message_index = None;
-            self.active_intent_trace_message_index = None;
-            self.push_chat(ChatRole::System, "System", "Disconnect requested");
-        } else {
-            self.push_chat(
-                ChatRole::Error,
-                "Error",
-                "Gateway worker is unavailable, forcing idle state",
-            );
-            self.connection_state = ConnectionState::Idle;
-            self.gateway_status = GatewayStatus::Idle;
-            self.uplink_streaming = false;
-            self.ws_command_tx = None;
-            self.session_id = None;
-            self.pending_detect_requests.clear();
-            self.active_tts_message_index = None;
-            self.active_intent_trace_message_index = None;
+        match command_tx.try_send(GatewayCommand::Disconnect) {
+            Ok(_) => {
+                self.connection_state = ConnectionState::Disconnecting;
+                self.pending_detect_requests.clear();
+                self.active_tts_message_index = None;
+                self.active_intent_trace_message_index = None;
+                self.push_chat(ChatRole::System, "System", "Disconnect requested");
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.push_chat(
+                    ChatRole::Error,
+                    "Error",
+                    "Gateway worker queue is full, disconnect delayed",
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.push_chat(
+                    ChatRole::Error,
+                    "Error",
+                    "Gateway worker is unavailable, forcing idle state",
+                );
+                self.connection_state = ConnectionState::Idle;
+                self.gateway_status = GatewayStatus::Idle;
+                self.uplink_streaming = false;
+                self.ws_command_tx = None;
+                self.session_id = None;
+                self.pending_detect_requests.clear();
+                self.active_tts_message_index = None;
+                self.active_intent_trace_message_index = None;
+            }
         }
 
         cx.notify();
@@ -590,22 +607,34 @@ impl MeetingHostShell {
             return;
         };
 
-        if command_tx.send(command).is_err() {
-            self.push_chat(
-                ChatRole::Error,
-                "Error",
-                "Failed to send command to gateway worker",
-            );
-            self.connection_state = ConnectionState::Idle;
-            self.gateway_status = GatewayStatus::Idle;
-            self.uplink_streaming = false;
-            self.ws_command_tx = None;
-            self.session_id = None;
-            self.pending_detect_requests.clear();
-            self.active_tts_message_index = None;
-            self.active_intent_trace_message_index = None;
-        } else if track_detect_request {
-            self.pending_detect_requests.push_back(Instant::now());
+        match command_tx.try_send(command) {
+            Ok(_) => {
+                if track_detect_request {
+                    self.pending_detect_requests.push_back(Instant::now());
+                }
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.push_chat(
+                    ChatRole::Error,
+                    "Error",
+                    "Gateway worker queue is full, command dropped",
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.push_chat(
+                    ChatRole::Error,
+                    "Error",
+                    "Failed to send command to gateway worker",
+                );
+                self.connection_state = ConnectionState::Idle;
+                self.gateway_status = GatewayStatus::Idle;
+                self.uplink_streaming = false;
+                self.ws_command_tx = None;
+                self.session_id = None;
+                self.pending_detect_requests.clear();
+                self.active_tts_message_index = None;
+                self.active_intent_trace_message_index = None;
+            }
         }
 
         cx.notify();
@@ -2813,1158 +2842,6 @@ fn env_or_default(key: &str, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
-#[derive(Debug)]
-struct AudioDeviceState {
-    input_devices: Vec<String>,
-    output_devices: Vec<String>,
-    selected_input_index: Option<usize>,
-    selected_input_output_index: Option<usize>,
-    input_from_output: bool,
-    selected_output_index: Option<usize>,
-}
-
-fn load_audio_device_state() -> AudioDeviceState {
-    let host = cpal::default_host();
-
-    let mut input_devices = list_input_device_names(&host);
-    let mut output_devices = list_output_device_names(&host);
-    input_devices.sort_unstable();
-    output_devices.sort_unstable();
-
-    let default_input_index = default_input_device_name(&host)
-        .as_deref()
-        .and_then(|name| find_device_index_by_hint(&input_devices, name));
-    let default_output_index = default_output_device_name(&host)
-        .as_deref()
-        .and_then(|name| find_device_index_by_hint(&output_devices, name));
-
-    let input_hint = env_optional(HOST_INPUT_DEVICE_ENV);
-    let input_hint_ref = input_hint.as_deref();
-    let env_input_index =
-        input_hint_ref.and_then(|hint| find_device_index_by_hint(&input_devices, hint));
-    let env_input_output_index = if env_input_index.is_none() {
-        input_hint_ref.and_then(|hint| find_device_index_by_hint(&output_devices, hint))
-    } else {
-        None
-    };
-    let input_from_output = env_input_output_index.is_some();
-    let selected_input_index = if input_from_output {
-        None
-    } else {
-        env_input_index.or(default_input_index)
-    };
-    let selected_input_output_index = env_input_output_index;
-    let selected_output_index = env_optional(HOST_OUTPUT_DEVICE_ENV)
-        .as_deref()
-        .and_then(|hint| find_device_index_by_hint(&output_devices, hint))
-        .or(default_output_index);
-
-    AudioDeviceState {
-        input_devices,
-        output_devices,
-        selected_input_index,
-        selected_input_output_index,
-        input_from_output,
-        selected_output_index,
-    }
-}
-
-fn list_input_device_names(host: &cpal::Host) -> Vec<String> {
-    match host.input_devices() {
-        Ok(devices) => devices.filter_map(|device| device.name().ok()).collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
-fn list_output_device_names(host: &cpal::Host) -> Vec<String> {
-    match host.output_devices() {
-        Ok(devices) => devices.filter_map(|device| device.name().ok()).collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
-fn default_input_device_name(host: &cpal::Host) -> Option<String> {
-    host.default_input_device()
-        .and_then(|device| device.name().ok())
-}
-
-fn default_output_device_name(host: &cpal::Host) -> Option<String> {
-    host.default_output_device()
-        .and_then(|device| device.name().ok())
-}
-
-fn should_mirror_selected_output_to_system(output_hint: Option<&str>) -> bool {
-    let Some(hint) = output_hint.map(str::trim).filter(|value| !value.is_empty()) else {
-        return false;
-    };
-
-    let host = cpal::default_host();
-    let selected_name = select_output_device(&host, Some(hint))
-        .ok()
-        .and_then(|device| device.name().ok());
-    let default_name = default_output_device_name(&host);
-
-    match (selected_name, default_name) {
-        (Some(selected), Some(default_device)) => !selected.eq_ignore_ascii_case(&default_device),
-        (Some(_), None) => true,
-        _ => true,
-    }
-}
-
-fn select_input_device(
-    host: &cpal::Host,
-    hint: Option<&str>,
-    from_output_loopback: bool,
-) -> Result<cpal::Device, String> {
-    if !from_output_loopback {
-        return select_input_device_by_hint(host, hint);
-    }
-
-    let Some(output_hint) = hint.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Err("Loopback input source requires a selected output device".to_string());
-    };
-
-    if let Some(device) = find_input_device_by_hint(host, output_hint)? {
-        return Ok(device);
-    }
-
-    let output_device = select_output_device(host, Some(output_hint))?;
-    if output_device.default_input_config().is_ok() {
-        return Ok(output_device);
-    }
-
-    let available_inputs = list_input_device_names(host);
-    Err(format!(
-        "Cannot capture output `{output_hint}` as input directly. Use a loopback-capable output (e.g. BlackHole) and ensure matching input exists. Available input devices: {}",
-        join_device_names(&available_inputs)
-    ))
-}
-
-fn select_input_device_by_hint(
-    host: &cpal::Host,
-    hint: Option<&str>,
-) -> Result<cpal::Device, String> {
-    let Some(hint) = hint.map(str::trim).filter(|value| !value.is_empty()) else {
-        return host
-            .default_input_device()
-            .ok_or_else(|| "No default microphone input device found".to_string());
-    };
-
-    if let Some(device) = find_input_device_by_hint(host, hint)? {
-        return Ok(device);
-    }
-
-    let available_inputs = list_input_device_names(host);
-    Err(format!(
-        "Input device `{hint}` not found. Available input devices: {}",
-        join_device_names(&available_inputs)
-    ))
-}
-
-fn find_input_device_by_hint(
-    host: &cpal::Host,
-    hint: &str,
-) -> Result<Option<cpal::Device>, String> {
-    let mut exact_match = None;
-    let mut fuzzy_match = None;
-    let hint_lower = hint.to_ascii_lowercase();
-
-    for device in host
-        .input_devices()
-        .map_err(|error| format!("Cannot enumerate input devices: {error}"))?
-    {
-        let name = device
-            .name()
-            .unwrap_or_else(|_| "<unknown-input-device>".to_string());
-
-        if name.eq_ignore_ascii_case(hint) {
-            exact_match = Some(device);
-            continue;
-        }
-
-        if fuzzy_match.is_none() && name.to_ascii_lowercase().contains(&hint_lower) {
-            fuzzy_match = Some(device);
-        }
-    }
-
-    Ok(exact_match.or(fuzzy_match))
-}
-
-fn select_output_device(host: &cpal::Host, hint: Option<&str>) -> Result<cpal::Device, String> {
-    let Some(hint) = hint.map(str::trim).filter(|value| !value.is_empty()) else {
-        return host
-            .default_output_device()
-            .ok_or_else(|| "No default speaker output device found".to_string());
-    };
-
-    let mut exact_match = None;
-    let mut fuzzy_match = None;
-    let mut available = Vec::new();
-    let hint_lower = hint.to_ascii_lowercase();
-
-    for device in host
-        .output_devices()
-        .map_err(|error| format!("Cannot enumerate output devices: {error}"))?
-    {
-        let name = device
-            .name()
-            .unwrap_or_else(|_| "<unknown-output-device>".to_string());
-        available.push(name.clone());
-
-        if name.eq_ignore_ascii_case(hint) {
-            exact_match = Some(device);
-            continue;
-        }
-
-        if fuzzy_match.is_none() && name.to_ascii_lowercase().contains(&hint_lower) {
-            fuzzy_match = Some(device);
-        }
-    }
-
-    if let Some(device) = exact_match.or(fuzzy_match) {
-        return Ok(device);
-    }
-
-    Err(format!(
-        "Output device `{hint}` not found. Available output devices: {}",
-        join_device_names(&available)
-    ))
-}
-
-fn join_device_names(names: &[String]) -> String {
-    if names.is_empty() {
-        "(none)".to_string()
-    } else {
-        names.join(", ")
-    }
-}
-
-fn find_device_index_by_hint(devices: &[String], hint: &str) -> Option<usize> {
-    if hint.is_empty() {
-        return None;
-    }
-
-    if let Some(index) = devices
-        .iter()
-        .position(|name| name.eq_ignore_ascii_case(hint))
-    {
-        return Some(index);
-    }
-
-    let hint_lower = hint.to_ascii_lowercase();
-    devices
-        .iter()
-        .position(|name| name.to_ascii_lowercase().contains(&hint_lower))
-}
-
-fn env_optional(key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn spawn_gateway_worker(
-    config: WsGatewayConfig,
-    audio_routing: AudioRoutingConfig,
-    mut command_rx: mpsc::UnboundedReceiver<GatewayCommand>,
-    event_tx: mpsc::UnboundedSender<UiGatewayEvent>,
-) {
-    thread::spawn(move || {
-        let runtime = match TokioRuntimeBuilder::new_multi_thread().enable_all().build() {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                    "Failed to build tokio runtime: {error}"
-                )));
-                let _ = event_tx.send(UiGatewayEvent::Disconnected);
-                return;
-            }
-        };
-
-        runtime.block_on(async move {
-            let _ = event_tx.send(UiGatewayEvent::OutgoingText {
-                kind: "hello".to_string(),
-                payload: to_pretty_json(&ClientTextMessage::hello(HelloMessage::new(
-                    config.device_id.clone(),
-                    config.device_name.clone(),
-                    config.device_mac.clone(),
-                    config.token.clone(),
-                )
-                .with_intent_trace_notify(true))),
-            });
-
-            let mut client = match WsGatewayClient::connect(config).await {
-                Ok(client) => client,
-                Err(error) => {
-                    let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                        "Gateway connection failed: {error}"
-                    )));
-                    let _ = event_tx.send(UiGatewayEvent::Disconnected);
-                    return;
-                }
-            };
-
-            let _ = event_tx.send(UiGatewayEvent::Connected {
-                session_id: client.session_id().to_string(),
-            });
-            let _ = event_tx.send(UiGatewayEvent::SystemNotice(format!(
-                "Audio route active -> input: {}, output: {}",
-                audio_routing.input_label(),
-                audio_routing.output_label()
-            )));
-
-            let mut uplink_streaming = false;
-            let mut microphone_capture = None;
-            let mut microphone_frame_rx = empty_audio_receiver();
-            let mut downlink_player: Option<DownlinkAudioPlayer> = None;
-            let mut downlink_playback_error_reported = false;
-            let mut input_monitor_player: Option<DownlinkAudioPlayer> = None;
-            let mut input_monitor_error_reported = false;
-            let mut output_monitor_player: Option<DownlinkAudioPlayer> = None;
-            let mut output_monitor_error_reported = false;
-            let mirror_output_to_system =
-                should_mirror_selected_output_to_system(audio_routing.output_device_name.as_deref());
-            let mirror_input_to_system = true;
-
-            loop {
-                tokio::select! {
-                    maybe_command = command_rx.recv() => {
-                        let Some(command) = maybe_command else {
-                            break;
-                        };
-
-                        let keep_running = handle_gateway_command(
-                            command,
-                            &mut client,
-                            &event_tx,
-                            &mut uplink_streaming,
-                            &mut microphone_capture,
-                            &mut microphone_frame_rx,
-                            &audio_routing,
-                        )
-                        .await;
-                        if !keep_running {
-                            break;
-                        }
-                    }
-                    maybe_frame = microphone_frame_rx.recv(), if uplink_streaming => {
-                        let Some(frame) = maybe_frame else {
-                            stop_uplink_capture(
-                                &mut uplink_streaming,
-                                &mut microphone_capture,
-                                &mut microphone_frame_rx,
-                                &event_tx,
-                            );
-                            let _ = event_tx.send(UiGatewayEvent::Error(
-                                "Microphone capture stopped unexpectedly".to_string(),
-                            ));
-                            if let Err(error) = client.send_listen_stop().await {
-                                let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                                    "Failed to send listen stop after microphone ended: {error}"
-                                )));
-                                break;
-                            }
-
-                            let _ = event_tx.send(UiGatewayEvent::OutgoingText {
-                                kind: "listen".to_string(),
-                                payload: to_pretty_json(&ClientTextMessage::listen_stop()),
-                            });
-                            continue;
-                        };
-
-                        if mirror_input_to_system && !input_monitor_error_reported {
-                            if input_monitor_player.is_none() {
-                                match DownlinkAudioPlayer::new(event_tx.clone(), None) {
-                                    Ok(player) => {
-                                        let description = player.description().to_string();
-                                        let _ = event_tx.send(UiGatewayEvent::SystemNotice(format!(
-                                            "Input monitor ready (selected input -> system speaker): {description}"
-                                        )));
-                                        input_monitor_player = Some(player);
-                                    }
-                                    Err(error) => {
-                                        input_monitor_error_reported = true;
-                                        let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                                            "Failed to init input monitor playback: {error}"
-                                        )));
-                                    }
-                                }
-                            }
-
-                            if let Some(player) = input_monitor_player.as_mut() {
-                                if let Err(error) = player.push_opus_packet(&frame) {
-                                    if !input_monitor_error_reported {
-                                        input_monitor_error_reported = true;
-                                        let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                                            "Failed to play input monitor packet: {error}"
-                                        )));
-                                    }
-                                }
-                            }
-                        }
-
-                        let frame_bytes = frame.len();
-                        if let Err(error) = client.send_audio_frame(frame).await {
-                            let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                                "Failed to send streaming audio frame: {error}"
-                            )));
-                            break;
-                        }
-
-                        let _ = event_tx.send(UiGatewayEvent::UplinkAudioFrameSent(frame_bytes));
-                    }
-                    maybe_event = client.next_event() => {
-                        let Some(event) = maybe_event else {
-                            break;
-                        };
-
-                        match event {
-                            WsGatewayEvent::Text(message) => {
-                                let _ = event_tx.send(UiGatewayEvent::IncomingText(message));
-                            }
-                            WsGatewayEvent::DownlinkAudio(data) => {
-                                if downlink_player.is_none() && !downlink_playback_error_reported {
-                                    match DownlinkAudioPlayer::new(
-                                        event_tx.clone(),
-                                        audio_routing.output_device_name.as_deref(),
-                                    ) {
-                                        Ok(player) => {
-                                            let description = player.description().to_string();
-                                            let _ = event_tx.send(UiGatewayEvent::SystemNotice(format!(
-                                                "Downlink playback ready: {description}"
-                                            )));
-                                            downlink_player = Some(player);
-                                        }
-                                        Err(error) => {
-                                            downlink_playback_error_reported = true;
-                                            let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                                                "Failed to init downlink playback: {error}"
-                                            )));
-                                        }
-                                    }
-                                }
-
-                                if let Some(player) = downlink_player.as_mut() {
-                                    if let Err(error) = player.push_opus_packet(&data) {
-                                        if !downlink_playback_error_reported {
-                                            downlink_playback_error_reported = true;
-                                            let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                                                "Failed to decode/play downlink Opus packet: {error}"
-                                            )));
-                                        }
-                                    }
-                                }
-
-                                if mirror_output_to_system && !output_monitor_error_reported {
-                                    if output_monitor_player.is_none() {
-                                        match DownlinkAudioPlayer::new(event_tx.clone(), None) {
-                                            Ok(player) => {
-                                                let description = player.description().to_string();
-                                                let _ = event_tx.send(UiGatewayEvent::SystemNotice(format!(
-                                                    "Output monitor ready (selected output -> system speaker): {description}"
-                                                )));
-                                                output_monitor_player = Some(player);
-                                            }
-                                            Err(error) => {
-                                                output_monitor_error_reported = true;
-                                                let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                                                    "Failed to init output monitor playback: {error}"
-                                                )));
-                                            }
-                                        }
-                                    }
-
-                                    if let Some(player) = output_monitor_player.as_mut() {
-                                        if let Err(error) = player.push_opus_packet(&data) {
-                                            if !output_monitor_error_reported {
-                                                output_monitor_error_reported = true;
-                                                let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                                                    "Failed to play output monitor packet: {error}"
-                                                )));
-                                            }
-                                        }
-                                    }
-                                }
-
-                                let _ = event_tx
-                                    .send(UiGatewayEvent::DownlinkAudioFrameReceived(data.len()));
-                            }
-                            WsGatewayEvent::MalformedText { raw, error } => {
-                                let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                                    "Malformed text frame: {error} | raw={raw}"
-                                )));
-                            }
-                            WsGatewayEvent::Closed => {
-                                break;
-                            }
-                            WsGatewayEvent::TransportError(error) => {
-                                let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                                    "Transport error: {error}"
-                                )));
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            stop_uplink_capture(
-                &mut uplink_streaming,
-                &mut microphone_capture,
-                &mut microphone_frame_rx,
-                &event_tx,
-            );
-
-            if let Some(player) = downlink_player.take() {
-                let _ = event_tx.send(UiGatewayEvent::SystemNotice(format!(
-                    "Downlink playback closed: {}",
-                    player.description()
-                )));
-            }
-
-            if let Some(player) = input_monitor_player.take() {
-                let _ = event_tx.send(UiGatewayEvent::SystemNotice(format!(
-                    "Input monitor closed: {}",
-                    player.description()
-                )));
-            }
-
-            if let Some(player) = output_monitor_player.take() {
-                let _ = event_tx.send(UiGatewayEvent::SystemNotice(format!(
-                    "Output monitor closed: {}",
-                    player.description()
-                )));
-            }
-
-            let _ = event_tx.send(UiGatewayEvent::Disconnected);
-        });
-    });
-}
-
-async fn handle_gateway_command(
-    command: GatewayCommand,
-    client: &mut WsGatewayClient,
-    event_tx: &mpsc::UnboundedSender<UiGatewayEvent>,
-    uplink_streaming: &mut bool,
-    microphone_capture: &mut Option<MicrophoneCapture>,
-    microphone_frame_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
-    audio_routing: &AudioRoutingConfig,
-) -> bool {
-    match command {
-        GatewayCommand::Disconnect => {
-            stop_uplink_capture(
-                uplink_streaming,
-                microphone_capture,
-                microphone_frame_rx,
-                event_tx,
-            );
-            false
-        }
-        GatewayCommand::DetectText(text) => {
-            if let Err(error) = client.send_listen_detect_text(text.clone()).await {
-                let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                    "Failed to send detect text: {error}"
-                )));
-                return false;
-            }
-
-            let _ = event_tx.send(UiGatewayEvent::OutgoingText {
-                kind: "listen".to_string(),
-                payload: to_pretty_json(&ClientTextMessage::listen_detect_text(text)),
-            });
-            true
-        }
-        GatewayCommand::StartUplinkStream => {
-            if *uplink_streaming {
-                return true;
-            }
-
-            if let Err(error) = client.send_listen_start().await {
-                let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                    "Failed to start uplink stream (listen start failed): {error}"
-                )));
-                return false;
-            }
-
-            let _ = event_tx.send(UiGatewayEvent::OutgoingText {
-                kind: "listen".to_string(),
-                payload: to_pretty_json(&ClientTextMessage::listen_start()),
-            });
-
-            let (capture, frame_rx) = match start_microphone_capture(
-                event_tx.clone(),
-                audio_routing.input_device_name.as_deref(),
-                audio_routing.input_from_output,
-            ) {
-                Ok(capture_session) => capture_session,
-                Err(error) => {
-                    let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                        "Failed to start microphone capture: {error}"
-                    )));
-                    if let Err(stop_error) = client.send_listen_stop().await {
-                        let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                            "Failed to rollback listen stop after microphone init failure: {stop_error}"
-                        )));
-                        return false;
-                    }
-
-                    let _ = event_tx.send(UiGatewayEvent::OutgoingText {
-                        kind: "listen".to_string(),
-                        payload: to_pretty_json(&ClientTextMessage::listen_stop()),
-                    });
-                    return true;
-                }
-            };
-
-            let capture_description = capture.description().to_string();
-            *microphone_capture = Some(capture);
-            *microphone_frame_rx = frame_rx;
-            *uplink_streaming = true;
-            let _ = event_tx.send(UiGatewayEvent::UplinkStreamStateChanged(true));
-            let _ = event_tx.send(UiGatewayEvent::SystemNotice(format!(
-                "Microphone capture ready: {capture_description}"
-            )));
-            true
-        }
-        GatewayCommand::StopUplinkStream => {
-            if !*uplink_streaming {
-                return true;
-            }
-
-            stop_uplink_capture(
-                uplink_streaming,
-                microphone_capture,
-                microphone_frame_rx,
-                event_tx,
-            );
-
-            if let Err(error) = client.send_listen_stop().await {
-                let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                    "Failed to stop uplink stream (listen stop failed): {error}"
-                )));
-                return false;
-            }
-
-            let _ = event_tx.send(UiGatewayEvent::OutgoingText {
-                kind: "listen".to_string(),
-                payload: to_pretty_json(&ClientTextMessage::listen_stop()),
-            });
-            true
-        }
-    }
-}
-
-struct MicrophoneCapture {
-    _stream: Stream,
-    description: String,
-}
-
-impl MicrophoneCapture {
-    fn new(stream: Stream, description: String) -> Self {
-        Self {
-            _stream: stream,
-            description,
-        }
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-}
-
-struct MicFrameBuilder {
-    channels: usize,
-    input_sample_rate_hz: u32,
-    resample_accumulator: f64,
-    frame_samples: Vec<i16>,
-    encoder: OpusPacketEncoder,
-    event_tx: mpsc::UnboundedSender<UiGatewayEvent>,
-    encode_error_reported: bool,
-}
-
-impl MicFrameBuilder {
-    fn new(
-        channels: usize,
-        input_sample_rate_hz: u32,
-        event_tx: mpsc::UnboundedSender<UiGatewayEvent>,
-    ) -> Result<Self, String> {
-        Ok(Self {
-            channels,
-            input_sample_rate_hz,
-            resample_accumulator: 0.0,
-            frame_samples: Vec::with_capacity(AUDIO_FRAME_SAMPLES),
-            encoder: OpusPacketEncoder::new()?,
-            event_tx,
-            encode_error_reported: false,
-        })
-    }
-
-    fn process_f32(&mut self, data: &[f32], frame_tx: &mpsc::UnboundedSender<Vec<u8>>) {
-        for frame in data.chunks(self.channels) {
-            let mut mixed = 0.0_f32;
-            for sample in frame {
-                mixed += *sample;
-            }
-            mixed /= frame.len() as f32;
-            self.push_sample(mixed, frame_tx);
-        }
-    }
-
-    fn process_i16(&mut self, data: &[i16], frame_tx: &mpsc::UnboundedSender<Vec<u8>>) {
-        for frame in data.chunks(self.channels) {
-            let mut mixed = 0.0_f32;
-            for sample in frame {
-                mixed += *sample as f32 / i16::MAX as f32;
-            }
-            mixed /= frame.len() as f32;
-            self.push_sample(mixed, frame_tx);
-        }
-    }
-
-    fn process_u16(&mut self, data: &[u16], frame_tx: &mpsc::UnboundedSender<Vec<u8>>) {
-        for frame in data.chunks(self.channels) {
-            let mut mixed = 0.0_f32;
-            for sample in frame {
-                mixed += (*sample as f32 / u16::MAX as f32) * 2.0 - 1.0;
-            }
-            mixed /= frame.len() as f32;
-            self.push_sample(mixed, frame_tx);
-        }
-    }
-
-    fn push_sample(&mut self, sample: f32, frame_tx: &mpsc::UnboundedSender<Vec<u8>>) {
-        self.resample_accumulator += AUDIO_SAMPLE_RATE_HZ as f64;
-        while self.resample_accumulator >= self.input_sample_rate_hz as f64 {
-            self.resample_accumulator -= self.input_sample_rate_hz as f64;
-
-            self.frame_samples.push(float_to_pcm16(sample));
-            if self.frame_samples.len() < AUDIO_FRAME_SAMPLES {
-                continue;
-            }
-
-            let packet = match self.encoder.encode_pcm16(&self.frame_samples) {
-                Ok(packet) => packet,
-                Err(error) => {
-                    self.report_encode_error_once(error);
-                    self.frame_samples.clear();
-                    return;
-                }
-            };
-            self.frame_samples.clear();
-
-            if frame_tx.send(packet).is_err() {
-                return;
-            }
-        }
-    }
-
-    fn report_encode_error_once(&mut self, error: String) {
-        if self.encode_error_reported {
-            return;
-        }
-
-        self.encode_error_reported = true;
-        let _ = self.event_tx.send(UiGatewayEvent::Error(format!(
-            "Opus encode error in microphone callback: {error}"
-        )));
-    }
-}
-
-struct OpusPacketEncoder {
-    encoder: OpusEncoder,
-    output_buffer: Vec<u8>,
-}
-
-impl OpusPacketEncoder {
-    fn new() -> Result<Self, String> {
-        let mut encoder = OpusEncoder::new(
-            AUDIO_SAMPLE_RATE_HZ,
-            OpusChannels::Mono,
-            OpusApplication::Voip,
-        )
-        .map_err(|error| format!("create opus encoder failed: {error}"))?;
-
-        encoder
-            .set_bitrate(OpusBitrate::Bits(OPUS_BITRATE_BPS))
-            .map_err(|error| format!("set opus bitrate failed: {error}"))?;
-        encoder
-            .set_complexity(OPUS_COMPLEXITY)
-            .map_err(|error| format!("set opus complexity failed: {error}"))?;
-        encoder
-            .set_dtx(true)
-            .map_err(|error| format!("enable opus DTX failed: {error}"))?;
-
-        Ok(Self {
-            encoder,
-            output_buffer: vec![0_u8; OPUS_MAX_PACKET_BYTES],
-        })
-    }
-
-    fn encode_pcm16(&mut self, samples: &[i16]) -> Result<Vec<u8>, String> {
-        if samples.len() != AUDIO_FRAME_SAMPLES {
-            return Err(format!(
-                "invalid opus frame sample size: expected {}, got {}",
-                AUDIO_FRAME_SAMPLES,
-                samples.len()
-            ));
-        }
-
-        let packet_len = self
-            .encoder
-            .encode(samples, &mut self.output_buffer)
-            .map_err(|error| format!("opus encode failed: {error}"))?;
-
-        Ok(self.output_buffer[..packet_len].to_vec())
-    }
-}
-
-struct DownlinkAudioPlayer {
-    _stream: Stream,
-    description: String,
-    output_sample_rate_hz: u32,
-    output_channels: usize,
-    output_buffer: Arc<Mutex<VecDeque<f32>>>,
-    max_buffer_samples: usize,
-    decoder: OpusDecoder,
-    decode_buffer: Vec<i16>,
-    resample_accumulator: f64,
-}
-
-impl DownlinkAudioPlayer {
-    fn new(
-        event_tx: mpsc::UnboundedSender<UiGatewayEvent>,
-        output_device_hint: Option<&str>,
-    ) -> Result<Self, String> {
-        let host = cpal::default_host();
-        let device = select_output_device(&host, output_device_hint)?;
-
-        let device_name = device
-            .name()
-            .unwrap_or_else(|_| "Unknown speaker".to_string());
-        let output_config = device
-            .default_output_config()
-            .map_err(|error| format!("Cannot read default speaker config: {error}"))?;
-
-        let output_channels = usize::from(output_config.channels());
-        if output_channels == 0 {
-            return Err("Speaker channel count is zero".to_string());
-        }
-
-        let output_sample_rate_hz = output_config.sample_rate().0;
-        let sample_format = output_config.sample_format();
-        let stream_config: cpal::StreamConfig = output_config.config();
-
-        let max_buffer_samples = usize::try_from(output_sample_rate_hz)
-            .unwrap_or(48_000)
-            .saturating_mul(output_channels)
-            .saturating_mul(DOWNLINK_BUFFER_SECONDS);
-        let output_buffer = Arc::new(Mutex::new(VecDeque::with_capacity(max_buffer_samples)));
-
-        let stream = build_speaker_output_stream(
-            &device,
-            &stream_config,
-            sample_format,
-            output_buffer.clone(),
-            event_tx,
-        )?;
-
-        stream
-            .play()
-            .map_err(|error| format!("Failed to start speaker output stream: {error}"))?;
-
-        let decoder = OpusDecoder::new(AUDIO_SAMPLE_RATE_HZ, OpusChannels::Mono)
-            .map_err(|error| format!("create opus decoder failed: {error}"))?;
-
-        let description = format!(
-            "{} | {:?}, {}ch @ {}Hz <- {}Hz mono opus",
-            device_name,
-            sample_format,
-            output_channels,
-            output_sample_rate_hz,
-            AUDIO_SAMPLE_RATE_HZ
-        );
-
-        Ok(Self {
-            _stream: stream,
-            description,
-            output_sample_rate_hz,
-            output_channels,
-            output_buffer,
-            max_buffer_samples,
-            decoder,
-            decode_buffer: vec![0_i16; OPUS_DECODE_MAX_SAMPLES],
-            resample_accumulator: 0.0,
-        })
-    }
-
-    fn description(&self) -> &str {
-        &self.description
-    }
-
-    fn push_opus_packet(&mut self, packet: &[u8]) -> Result<(), String> {
-        let decoded_samples = self
-            .decoder
-            .decode(packet, &mut self.decode_buffer, false)
-            .map_err(|error| format!("opus decode failed: {error}"))?;
-
-        if decoded_samples == 0 {
-            return Ok(());
-        }
-
-        let mut output_samples = Vec::with_capacity(decoded_samples * self.output_channels);
-        for &sample in self.decode_buffer[..decoded_samples].iter() {
-            let mono = pcm16_to_float(sample);
-            self.resample_accumulator += self.output_sample_rate_hz as f64;
-
-            while self.resample_accumulator >= AUDIO_SAMPLE_RATE_HZ as f64 {
-                self.resample_accumulator -= AUDIO_SAMPLE_RATE_HZ as f64;
-                for _ in 0..self.output_channels {
-                    output_samples.push(mono);
-                }
-            }
-        }
-
-        if output_samples.is_empty() {
-            return Ok(());
-        }
-
-        let mut buffer = self
-            .output_buffer
-            .lock()
-            .map_err(|_| "speaker output buffer lock poisoned".to_string())?;
-
-        let required_len = buffer.len().saturating_add(output_samples.len());
-        if required_len > self.max_buffer_samples {
-            let drop_count = required_len - self.max_buffer_samples;
-            for _ in 0..drop_count {
-                let _ = buffer.pop_front();
-            }
-        }
-
-        buffer.extend(output_samples);
-        Ok(())
-    }
-}
-
-fn build_speaker_output_stream(
-    device: &cpal::Device,
-    stream_config: &cpal::StreamConfig,
-    sample_format: SampleFormat,
-    output_buffer: Arc<Mutex<VecDeque<f32>>>,
-    event_tx: mpsc::UnboundedSender<UiGatewayEvent>,
-) -> Result<Stream, String> {
-    let error_callback = move |error| {
-        let _ = event_tx.send(UiGatewayEvent::Error(format!(
-            "Speaker stream runtime error: {error}"
-        )));
-    };
-
-    match sample_format {
-        SampleFormat::F32 => {
-            let output_buffer = output_buffer.clone();
-            device.build_output_stream(
-                stream_config,
-                move |data: &mut [f32], _| fill_output_buffer_f32(data, &output_buffer),
-                error_callback,
-                None,
-            )
-        }
-        SampleFormat::I16 => {
-            let output_buffer = output_buffer.clone();
-            device.build_output_stream(
-                stream_config,
-                move |data: &mut [i16], _| fill_output_buffer_i16(data, &output_buffer),
-                error_callback,
-                None,
-            )
-        }
-        SampleFormat::U16 => {
-            let output_buffer = output_buffer.clone();
-            device.build_output_stream(
-                stream_config,
-                move |data: &mut [u16], _| fill_output_buffer_u16(data, &output_buffer),
-                error_callback,
-                None,
-            )
-        }
-        other => {
-            return Err(format!(
-                "Unsupported speaker sample format: {other:?}. Expect f32/i16/u16"
-            ));
-        }
-    }
-    .map_err(|error| format!("Failed to build speaker output stream: {error}"))
-}
-
-fn fill_output_buffer_f32(output: &mut [f32], output_buffer: &Arc<Mutex<VecDeque<f32>>>) {
-    let Ok(mut buffer) = output_buffer.lock() else {
-        for sample in output.iter_mut() {
-            *sample = 0.0;
-        }
-        return;
-    };
-
-    for sample in output.iter_mut() {
-        *sample = buffer.pop_front().unwrap_or(0.0);
-    }
-}
-
-fn fill_output_buffer_i16(output: &mut [i16], output_buffer: &Arc<Mutex<VecDeque<f32>>>) {
-    let Ok(mut buffer) = output_buffer.lock() else {
-        for sample in output.iter_mut() {
-            *sample = 0;
-        }
-        return;
-    };
-
-    for sample in output.iter_mut() {
-        let value = buffer.pop_front().unwrap_or(0.0);
-        *sample = float_to_pcm16(value);
-    }
-}
-
-fn fill_output_buffer_u16(output: &mut [u16], output_buffer: &Arc<Mutex<VecDeque<f32>>>) {
-    let Ok(mut buffer) = output_buffer.lock() else {
-        for sample in output.iter_mut() {
-            *sample = u16::MAX / 2;
-        }
-        return;
-    };
-
-    for sample in output.iter_mut() {
-        let value = buffer.pop_front().unwrap_or(0.0);
-        *sample = float_to_u16(value);
-    }
-}
-
-fn empty_audio_receiver() -> mpsc::UnboundedReceiver<Vec<u8>> {
-    let (_tx, rx) = mpsc::unbounded_channel();
-    rx
-}
-
-fn stop_uplink_capture(
-    uplink_streaming: &mut bool,
-    microphone_capture: &mut Option<MicrophoneCapture>,
-    microphone_frame_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
-    event_tx: &mpsc::UnboundedSender<UiGatewayEvent>,
-) {
-    if *uplink_streaming {
-        *uplink_streaming = false;
-        let _ = event_tx.send(UiGatewayEvent::UplinkStreamStateChanged(false));
-    }
-
-    if let Some(capture) = microphone_capture.as_ref() {
-        let _ = event_tx.send(UiGatewayEvent::SystemNotice(format!(
-            "Microphone capture closed: {}",
-            capture.description()
-        )));
-    }
-
-    *microphone_capture = None;
-    *microphone_frame_rx = empty_audio_receiver();
-}
-
-fn start_microphone_capture(
-    event_tx: mpsc::UnboundedSender<UiGatewayEvent>,
-    input_device_hint: Option<&str>,
-    input_from_output_loopback: bool,
-) -> Result<(MicrophoneCapture, mpsc::UnboundedReceiver<Vec<u8>>), String> {
-    let host = cpal::default_host();
-    let device = select_input_device(&host, input_device_hint, input_from_output_loopback)?;
-
-    let device_name = device
-        .name()
-        .unwrap_or_else(|_| "Unknown microphone".to_string());
-    let input_config = device
-        .default_input_config()
-        .map_err(|error| format!("Cannot read default microphone config: {error}"))?;
-
-    let channels = usize::from(input_config.channels());
-    if channels == 0 {
-        return Err("Microphone channel count is zero".to_string());
-    }
-
-    let sample_format = input_config.sample_format();
-    let input_sample_rate_hz = input_config.sample_rate().0;
-    let stream_config: cpal::StreamConfig = input_config.config();
-    let (frame_tx, frame_rx) = mpsc::unbounded_channel();
-
-    let error_tx = event_tx.clone();
-    let error_callback = move |error| {
-        let _ = error_tx.send(UiGatewayEvent::Error(format!(
-            "Microphone stream runtime error: {error}"
-        )));
-    };
-
-    let stream = match sample_format {
-        SampleFormat::F32 => {
-            let frame_tx = frame_tx.clone();
-            let mut frame_builder =
-                MicFrameBuilder::new(channels, input_sample_rate_hz, event_tx.clone())?;
-            device.build_input_stream(
-                &stream_config,
-                move |data: &[f32], _| frame_builder.process_f32(data, &frame_tx),
-                error_callback,
-                None,
-            )
-        }
-        SampleFormat::I16 => {
-            let frame_tx = frame_tx.clone();
-            let mut frame_builder =
-                MicFrameBuilder::new(channels, input_sample_rate_hz, event_tx.clone())?;
-            device.build_input_stream(
-                &stream_config,
-                move |data: &[i16], _| frame_builder.process_i16(data, &frame_tx),
-                error_callback,
-                None,
-            )
-        }
-        SampleFormat::U16 => {
-            let frame_tx = frame_tx.clone();
-            let mut frame_builder =
-                MicFrameBuilder::new(channels, input_sample_rate_hz, event_tx.clone())?;
-            device.build_input_stream(
-                &stream_config,
-                move |data: &[u16], _| frame_builder.process_u16(data, &frame_tx),
-                error_callback,
-                None,
-            )
-        }
-        other => {
-            return Err(format!(
-                "Unsupported microphone sample format: {other:?}. Expect f32/i16/u16"
-            ));
-        }
-    }
-    .map_err(|error| format!("Failed to build microphone input stream: {error}"))?;
-
-    stream
-        .play()
-        .map_err(|error| format!("Failed to start microphone input stream: {error}"))?;
-
-    let description = format!(
-        "{} | {:?}, {}ch @ {}Hz -> {}Hz mono opus",
-        device_name, sample_format, channels, input_sample_rate_hz, AUDIO_SAMPLE_RATE_HZ
-    );
-
-    Ok((MicrophoneCapture::new(stream, description), frame_rx))
-}
-
-fn float_to_pcm16(sample: f32) -> i16 {
-    let clamped = sample.clamp(-1.0, 1.0);
-    (clamped * i16::MAX as f32).round() as i16
-}
-
-fn float_to_u16(sample: f32) -> u16 {
-    let normalized = (sample.clamp(-1.0, 1.0) + 1.0) * 0.5;
-    (normalized * u16::MAX as f32).round() as u16
-}
-
-fn pcm16_to_float(sample: i16) -> f32 {
-    (sample as f32 / i16::MAX as f32).clamp(-1.0, 1.0)
-}
-
 fn describe_inbound_message(message: &InboundTextMessage) -> Option<(ChatRole, String, String)> {
     match message.message_type.as_str() {
         "hello" => None,
@@ -4228,11 +3105,38 @@ fn format_response_latency(response_latency_ms: u64) -> String {
     }
 }
 
-fn to_pretty_json<T: serde::Serialize>(value: &T) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|error| {
-        format!(
-            "{{\"error\":\"json serialize failed\",\"detail\":\"{}\"}}",
-            error
-        )
-    })
+#[cfg(test)]
+mod tests {
+    use super::{
+        extract_intent_trace_turn_key, format_response_latency, is_llm_emotion_placeholder,
+    };
+
+    #[test]
+    fn emotion_placeholder_detection_handles_emoji_only_text() {
+        assert!(is_llm_emotion_placeholder("😀"));
+        assert!(is_llm_emotion_placeholder("😀 😄"));
+        assert!(!is_llm_emotion_placeholder("hello 😀"));
+        assert!(!is_llm_emotion_placeholder(""));
+    }
+
+    #[test]
+    fn trace_turn_key_supports_string_and_number() {
+        let string_turn = serde_json::json!({ "turn_id": "abc" });
+        assert_eq!(
+            extract_intent_trace_turn_key(string_turn.as_object().expect("object")),
+            Some("turn:abc".to_string())
+        );
+
+        let numeric_turn = serde_json::json!({ "turn_id": 42 });
+        assert_eq!(
+            extract_intent_trace_turn_key(numeric_turn.as_object().expect("object")),
+            Some("turn:42".to_string())
+        );
+    }
+
+    #[test]
+    fn response_latency_format_is_stable() {
+        assert_eq!(format_response_latency(980), "980ms");
+        assert_eq!(format_response_latency(1_200), "1.2s");
+    }
 }

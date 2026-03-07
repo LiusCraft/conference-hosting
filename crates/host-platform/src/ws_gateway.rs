@@ -7,6 +7,8 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::header::{HeaderName, HeaderValue, AUTHORIZATION};
 use tokio_tungstenite::tungstenite::{self, Message};
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use url::Url;
@@ -111,6 +113,11 @@ pub enum WsGatewayError {
     WebSocket(Box<tungstenite::Error>),
     #[error("json serialization error: {0}")]
     Serialize(#[from] serde_json::Error),
+    #[error("invalid websocket header `{name}`: {source}")]
+    InvalidHeaderValue {
+        name: &'static str,
+        source: tungstenite::http::header::InvalidHeaderValue,
+    },
     #[error("hello handshake timed out after {0:?}")]
     HelloTimeout(Duration),
     #[error("hello handshake failed: {0}")]
@@ -133,7 +140,28 @@ pub struct WsGatewayClient {
 impl WsGatewayClient {
     pub async fn connect(config: WsGatewayConfig) -> Result<Self, WsGatewayError> {
         let url = config.websocket_url()?;
-        let (mut socket, _) = connect_async(url.as_str()).await?;
+        let mut request = url.as_str().into_client_request()?;
+        {
+            let headers = request.headers_mut();
+            headers.insert(
+                AUTHORIZATION,
+                header_value("Authorization", &format!("Bearer {}", config.token))?,
+            );
+            headers.insert(
+                HeaderName::from_static("device-id"),
+                header_value("Device-Id", &config.device_id)?,
+            );
+            headers.insert(
+                HeaderName::from_static("client-id"),
+                header_value("Client-Id", &config.client_id)?,
+            );
+            headers.insert(
+                HeaderName::from_static("protocol-version"),
+                header_value("Protocol-Version", "1")?,
+            );
+        }
+
+        let (mut socket, _) = connect_async(request).await?;
 
         let hello_text = serde_json::to_string(&config.hello_message())?;
         socket.send(Message::Text(hello_text.into())).await?;
@@ -232,6 +260,11 @@ impl WsGatewayClient {
     }
 }
 
+fn header_value(name: &'static str, value: &str) -> Result<HeaderValue, WsGatewayError> {
+    HeaderValue::from_str(value)
+        .map_err(|source| WsGatewayError::InvalidHeaderValue { name, source })
+}
+
 async fn wait_for_hello(
     socket: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
     early_events: &mut Vec<WsGatewayEvent>,
@@ -282,7 +315,9 @@ mod tests {
     use futures_util::{SinkExt, StreamExt};
     use tokio::net::TcpListener;
     use tokio::time;
-    use tokio_tungstenite::accept_async;
+    use tokio_tungstenite::accept_hdr_async;
+    use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+    use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
     use tokio_tungstenite::tungstenite::Message;
 
     use super::{WsGatewayClient, WsGatewayConfig, WsGatewayError, WsGatewayEvent};
@@ -301,6 +336,47 @@ mod tests {
         }
     }
 
+    #[allow(clippy::result_large_err)]
+    fn assert_required_headers(
+        request: &Request,
+        response: Response,
+    ) -> Result<Response, ErrorResponse> {
+        assert_eq!(
+            request
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer token-demo")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("device-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("dev-001")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("client-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("host-client")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("protocol-version")
+                .and_then(|value| value.to_str().ok()),
+            Some("1")
+        );
+        Ok(response)
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn accept_any_headers(_: &Request, response: Response) -> Result<Response, ErrorResponse> {
+        Ok(response)
+    }
+
     #[tokio::test]
     async fn ws_gateway_hello_and_audio_roundtrip_works() {
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -310,7 +386,9 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept socket");
-            let mut socket = accept_async(stream).await.expect("upgrade websocket");
+            let mut socket = accept_hdr_async(stream, assert_required_headers)
+                .await
+                .expect("upgrade websocket");
 
             let hello_raw = expect_text(
                 socket
@@ -450,7 +528,9 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept socket");
-            let mut socket = accept_async(stream).await.expect("upgrade websocket");
+            let mut socket = accept_hdr_async(stream, accept_any_headers)
+                .await
+                .expect("upgrade websocket");
 
             let _ = socket.next().await;
             time::sleep(Duration::from_millis(300)).await;
