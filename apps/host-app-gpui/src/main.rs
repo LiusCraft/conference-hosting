@@ -2,6 +2,11 @@ use std::collections::VecDeque;
 use std::ops::Range;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod assets;
+mod components;
+
+use assets::AppAssets;
+use components::icon::{icon, IconName};
 use gateway_runtime::{
     load_audio_device_state, spawn_gateway_worker, COMMAND_CHANNEL_CAPACITY, EVENT_CHANNEL_CAPACITY,
 };
@@ -1106,28 +1111,48 @@ impl MeetingHostShell {
                             .child(format!("{} | {}", header, message.body)),
                     ),
             ),
-            ChatRole::Tool => div().flex().min_w_0().px_4().py_1().gap_2().child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .min_w_0()
-                    .flex_1()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(0xd98a3c))
-                            .whitespace_normal()
-                            .child(message.body.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0x7f8899))
-                            .whitespace_normal()
-                            .child(header.clone()),
-                    ),
-            ),
+            ChatRole::Tool => div()
+                .flex()
+                .min_w_0()
+                .items_start()
+                .px_4()
+                .py_1()
+                .gap_2()
+                .child(
+                    div()
+                        .size_5()
+                        .mt_1()
+                        .rounded_md()
+                        .bg(rgb(0x2b1d0c))
+                        .border_1()
+                        .border_color(rgb(0x70451d))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(ui_icon(IconName::Wrench, 12.0, 0xd98a3c)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .flex_1()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(rgb(0xd98a3c))
+                                .whitespace_normal()
+                                .child(message.body.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x7f8899))
+                                .whitespace_normal()
+                                .child(header.clone()),
+                        ),
+                ),
             ChatRole::Trace => {
                 let trace_lines: Vec<SharedString> = message
                     .body
@@ -1224,7 +1249,7 @@ impl MeetingHostShell {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child("TL"),
+                            .child(ui_icon(IconName::Wrench, 14.0, 0xf5c76f)),
                     )
                     .child(trace_content)
             }
@@ -1247,7 +1272,7 @@ impl MeetingHostShell {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child("AI"),
+                        .child(ui_icon(IconName::Bot, 14.0, 0x15d3be)),
                 )
                 .child(
                     div()
@@ -1290,7 +1315,7 @@ impl MeetingHostShell {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child("STT"),
+                        .child(ui_icon(IconName::User, 14.0, 0x8a94a8)),
                 )
                 .child(
                     div()
@@ -1333,7 +1358,7 @@ impl MeetingHostShell {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child("ERR"),
+                        .child(ui_icon(IconName::X, 14.0, 0xfb7185)),
                 )
                 .child(
                     div()
@@ -1403,7 +1428,14 @@ impl Render for MeetingHostShell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child("连接服务器")
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(ui_icon(IconName::Wifi, 14.0, 0x95f8ef))
+                        .child("连接服务器"),
+                )
                 .on_click(cx.listener(|view, _event, _window, cx| view.connect_gateway(cx))),
             ConnectionState::Connected => div()
                 .id("disconnect-button")
@@ -1420,7 +1452,14 @@ impl Render for MeetingHostShell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child("断开连接")
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(ui_icon(IconName::WifiOff, 14.0, 0xff99a6))
+                        .child("断开连接"),
+                )
                 .on_click(cx.listener(|view, _event, _window, cx| view.disconnect_gateway(cx))),
             ConnectionState::Connecting => div()
                 .id("connect-button")
@@ -1436,7 +1475,14 @@ impl Render for MeetingHostShell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child("连接中..."),
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(ui_icon(IconName::Activity, 14.0, 0xf4d190))
+                        .child("连接中..."),
+                ),
             ConnectionState::Disconnecting => div()
                 .id("connect-button")
                 .w_full()
@@ -1451,7 +1497,14 @@ impl Render for MeetingHostShell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child("断开中..."),
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(ui_icon(IconName::Activity, 14.0, 0xf4d190))
+                        .child("断开中..."),
+                ),
         };
 
         let input_selector_button = div()
@@ -1469,17 +1522,21 @@ impl Render for MeetingHostShell {
             .justify_between()
             .child(
                 div()
-                    .text_sm()
-                    .text_color(rgb(0xd2d9e7))
-                    .text_ellipsis()
-                    .child(selected_input.clone()),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .flex_1()
+                    .child(ui_icon(audio_device_icon(&selected_input), 13.0, 0x4fd7c5))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xd2d9e7))
+                            .text_ellipsis()
+                            .child(selected_input.clone()),
+                    ),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0x7f8ba1))
-                    .child(if self.show_input_dropdown { "^" } else { "v" }),
-            )
+            .child(div().child(ui_icon(IconName::ChevronDown, 12.0, 0x7f8ba1)))
             .on_click(cx.listener(|view, _event, _window, cx| view.toggle_input_dropdown(cx)));
 
         let mut input_selector = div()
@@ -1488,8 +1545,12 @@ impl Render for MeetingHostShell {
             .gap_1()
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
                     .text_xs()
                     .text_color(rgb(0x5f6d84))
+                    .child(ui_icon(IconName::Mic, 12.0, 0x5f6d84))
                     .child("输入源 (采集)"),
             )
             .child(input_selector_button);
@@ -1534,7 +1595,21 @@ impl Render for MeetingHostShell {
                         row = row.bg(rgb(0x0d1422)).text_color(rgb(0xcbd5e5));
                     }
 
-                    input_dropdown = input_dropdown.child(row.child(name.clone()));
+                    input_dropdown = input_dropdown.child(
+                        row.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .min_w_0()
+                                .child(ui_icon(
+                                    audio_device_icon(name),
+                                    12.0,
+                                    if selected { 0x6df3e2 } else { 0x8b97ac },
+                                ))
+                                .child(div().text_ellipsis().child(name.clone())),
+                        ),
+                    );
                 }
             }
 
@@ -1545,7 +1620,14 @@ impl Render for MeetingHostShell {
                     .text_xs()
                     .text_color(rgb(0x7f8ba1))
                     .bg(rgb(0x0a101c))
-                    .child("输出回采 (loopback)"),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(ui_icon(IconName::Cable, 11.0, 0x7f8ba1))
+                            .child("输出回采 (loopback)"),
+                    ),
             );
 
             if self.output_devices.is_empty() {
@@ -1578,7 +1660,21 @@ impl Render for MeetingHostShell {
                         row = row.bg(rgb(0x0d1422)).text_color(rgb(0xcbd5e5));
                     }
 
-                    input_dropdown = input_dropdown.child(row.child(format!("loopback: {name}")));
+                    input_dropdown = input_dropdown.child(
+                        row.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .min_w_0()
+                                .child(ui_icon(
+                                    IconName::Cable,
+                                    12.0,
+                                    if selected { 0x6df3e2 } else { 0x8b97ac },
+                                ))
+                                .child(div().text_ellipsis().child(format!("loopback: {name}"))),
+                        ),
+                    );
                 }
             }
 
@@ -1600,17 +1696,21 @@ impl Render for MeetingHostShell {
             .justify_between()
             .child(
                 div()
-                    .text_sm()
-                    .text_color(rgb(0xd2d9e7))
-                    .text_ellipsis()
-                    .child(selected_output.clone()),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .min_w_0()
+                    .flex_1()
+                    .child(ui_icon(audio_device_icon(&selected_output), 13.0, 0x4fd7c5))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xd2d9e7))
+                            .text_ellipsis()
+                            .child(selected_output.clone()),
+                    ),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0x7f8ba1))
-                    .child(if self.show_output_dropdown { "^" } else { "v" }),
-            )
+            .child(div().child(ui_icon(IconName::ChevronDown, 12.0, 0x7f8ba1)))
             .on_click(cx.listener(|view, _event, _window, cx| view.toggle_output_dropdown(cx)));
 
         let mut output_selector = div()
@@ -1619,8 +1719,12 @@ impl Render for MeetingHostShell {
             .gap_1()
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
                     .text_xs()
                     .text_color(rgb(0x5f6d84))
+                    .child(ui_icon(IconName::Volume2, 12.0, 0x5f6d84))
                     .child("输出源 (播放)"),
             )
             .child(output_selector_button);
@@ -1664,7 +1768,21 @@ impl Render for MeetingHostShell {
                         row = row.bg(rgb(0x0d1422)).text_color(rgb(0xcbd5e5));
                     }
 
-                    output_dropdown = output_dropdown.child(row.child(name.clone()));
+                    output_dropdown = output_dropdown.child(
+                        row.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .min_w_0()
+                                .child(ui_icon(
+                                    audio_device_icon(name),
+                                    12.0,
+                                    if selected { 0x6df3e2 } else { 0x8b97ac },
+                                ))
+                                .child(div().text_ellipsis().child(name.clone())),
+                        ),
+                    );
                 }
             }
 
@@ -1687,7 +1805,14 @@ impl Render for MeetingHostShell {
                     .cursor_pointer()
                     .flex()
                     .items_center()
-                    .child("采集中")
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(ui_icon(IconName::Mic, 14.0, 0x6af3e2))
+                            .child("采集中"),
+                    )
                     .on_click(
                         cx.listener(|view, _event, _window, cx| view.toggle_uplink_stream(cx)),
                     )
@@ -1706,7 +1831,14 @@ impl Render for MeetingHostShell {
                     .cursor_pointer()
                     .flex()
                     .items_center()
-                    .child("采集已暂停")
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(ui_icon(IconName::MicOff, 14.0, 0x8a96ab))
+                            .child("采集已暂停"),
+                    )
                     .on_click(
                         cx.listener(|view, _event, _window, cx| view.toggle_uplink_stream(cx)),
                     )
@@ -1725,7 +1857,14 @@ impl Render for MeetingHostShell {
                 .text_color(rgb(0x8a96ab))
                 .flex()
                 .items_center()
-                .child("采集中")
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(ui_icon(IconName::MicOff, 14.0, 0x8a96ab))
+                        .child("采集中"),
+                )
         };
 
         let speaker_button = if self.speaker_output_enabled {
@@ -1743,7 +1882,14 @@ impl Render for MeetingHostShell {
                 .cursor_pointer()
                 .flex()
                 .items_center()
-                .child("播放中")
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(ui_icon(IconName::Volume2, 14.0, 0x6af3e2))
+                        .child("播放中"),
+                )
                 .on_click(cx.listener(|view, _event, _window, cx| view.toggle_speaker_output(cx)))
         } else {
             div()
@@ -1760,7 +1906,14 @@ impl Render for MeetingHostShell {
                 .cursor_pointer()
                 .flex()
                 .items_center()
-                .child("播放已暂停")
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(ui_icon(IconName::VolumeX, 14.0, 0x8a96ab))
+                        .child("播放已暂停"),
+                )
                 .on_click(cx.listener(|view, _event, _window, cx| view.toggle_speaker_output(cx)))
         };
 
@@ -1796,6 +1949,11 @@ impl Render for MeetingHostShell {
                                     .child(
                                         div().size_2().rounded_full().bg(rgb(connection_status.3)),
                                     )
+                                    .child(if is_connected {
+                                        ui_icon(IconName::Wifi, 14.0, 0x16d9c0)
+                                    } else {
+                                        ui_icon(IconName::WifiOff, 14.0, 0x7f8ba1)
+                                    })
                                     .child(
                                         div()
                                             .text_lg()
@@ -1823,8 +1981,22 @@ impl Render for MeetingHostShell {
                                 .gap_4()
                                 .text_xs()
                                 .text_color(rgb(0x7f8ba1))
-                                .child("RTT 48ms")
-                                .child("50 fps"),
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(ui_icon(IconName::Activity, 12.0, 0x16d9c0))
+                                        .child("RTT 48ms"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(ui_icon(IconName::Radio, 12.0, 0x16d9c0))
+                                        .child("50 fps"),
+                                ),
                         )
                     } else {
                         None
@@ -1839,7 +2011,16 @@ impl Render for MeetingHostShell {
                     .p_4()
                     .border_b_1()
                     .border_color(rgb(0x1a2232))
-                    .child(div().text_sm().text_color(rgb(0x66758b)).child("音频设备"))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_sm()
+                            .text_color(rgb(0x66758b))
+                            .child(ui_icon(IconName::Headphones, 13.0, 0x66758b))
+                            .child("音频设备"),
+                    )
                     .child(input_selector)
                     .child(output_selector),
             )
@@ -1851,7 +2032,16 @@ impl Render for MeetingHostShell {
                     .p_4()
                     .border_b_1()
                     .border_color(rgb(0x1a2232))
-                    .child(div().text_sm().text_color(rgb(0x66758b)).child("电平指示"))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_sm()
+                            .text_color(rgb(0x66758b))
+                            .child(ui_icon(IconName::AudioLines, 13.0, 0x66758b))
+                            .child("电平指示"),
+                    )
                     .child(render_level_meter(
                         "INPUT",
                         self.input_level_percent(),
@@ -1878,9 +2068,13 @@ impl Render for MeetingHostShell {
                 div().mt_auto().p_4().child(
                     div()
                         .id("open-settings-button")
+                        .flex()
+                        .items_center()
+                        .gap_2()
                         .text_sm()
                         .text_color(rgb(0x8a96ab))
                         .cursor_pointer()
+                        .child(ui_icon(IconName::Settings, 14.0, 0x8a96ab))
                         .child("设置")
                         .on_click(
                             cx.listener(|view, _event, _window, cx| view.open_settings_panel(cx)),
@@ -1997,7 +2191,7 @@ impl Render for MeetingHostShell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child("->")
+                .child(ui_icon(IconName::Send, 14.0, 0x9af9ef))
                 .on_click(cx.listener(|view, _event, _window, cx| view.send_text_draft(cx)))
         } else {
             div()
@@ -2011,7 +2205,7 @@ impl Render for MeetingHostShell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child("->")
+                .child(ui_icon(IconName::Send, 14.0, 0x556178))
         };
 
         let mut message_stream = div()
@@ -2097,7 +2291,7 @@ impl Render for MeetingHostShell {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child("v"),
+                            .child(ui_icon(IconName::ChevronDown, 12.0, 0x8fa8ca)),
                     )
                     .child(pending_chat_label)
                     .on_click(cx.listener(|view, _event, _window, cx| {
@@ -2129,6 +2323,7 @@ impl Render for MeetingHostShell {
                             .flex()
                             .items_center()
                             .gap_2()
+                            .child(ui_icon(IconName::AudioLines, 14.0, 0x16d9c0))
                             .child(div().text_lg().text_color(rgb(0xd7deec)).child("会话记录"))
                             .child(
                                 div()
@@ -2194,12 +2389,30 @@ impl Render for MeetingHostShell {
                     .gap_4()
                     .text_sm()
                     .text_color(rgb(0x6f7b8f))
-                    .child("CPU 2.3%")
-                    .child("RAM 48 MB")
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(ui_icon(IconName::Cpu, 12.0, 0x6f7b8f))
+                            .child("CPU 2.3%"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(ui_icon(IconName::HardDrive, 12.0, 0x6f7b8f))
+                            .child("RAM 48 MB"),
+                    )
                     .children(if is_connected {
                         Some(
                             div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
                                 .text_color(rgb(0x16d9c0))
+                                .child(ui_icon(IconName::Zap, 12.0, 0x16d9c0))
                                 .child("延迟 ~700ms (采集 20ms + 网络 50ms + ASR 200ms + LLM 300ms + TTS 130ms)"),
                         )
                     } else {
@@ -2208,8 +2421,12 @@ impl Render for MeetingHostShell {
             )
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
                     .text_sm()
                     .text_color(rgb(0x7d8798))
+                    .child(ui_icon(IconName::Clock, 12.0, 0x7d8798))
                     .child(wall_clock_label()),
             );
 
@@ -2253,9 +2470,13 @@ impl Render for MeetingHostShell {
                         .justify_between()
                         .child(
                             div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
                                 .text_xl()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(0xe2e8f4))
+                                .child(ui_icon(IconName::Settings, 16.0, 0x16d9c0))
                                 .child("设置"),
                         )
                         .child(
@@ -2271,7 +2492,7 @@ impl Render for MeetingHostShell {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .child("x")
+                                .child(ui_icon(IconName::X, 13.0, 0x8a96ab))
                                 .on_click(cx.listener(|view, _event, _window, cx| {
                                     view.close_settings_panel(cx)
                                 })),
@@ -2294,9 +2515,13 @@ impl Render for MeetingHostShell {
                                 .gap_2()
                                 .child(
                                     div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
                                         .text_sm()
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(rgb(0xdce4f3))
+                                        .child(ui_icon(IconName::Server, 13.0, 0x16d9c0))
                                         .child("WebSocket 服务器"),
                                 )
                                 .child(
@@ -2321,9 +2546,13 @@ impl Render for MeetingHostShell {
                                 .gap_2()
                                 .child(
                                     div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
                                         .text_sm()
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(rgb(0xdce4f3))
+                                        .child(ui_icon(IconName::ShieldCheck, 13.0, 0x16d9c0))
                                         .child("认证信息"),
                                 )
                                 .child(
@@ -2354,9 +2583,13 @@ impl Render for MeetingHostShell {
                                 .gap_2()
                                 .child(
                                     div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
                                         .text_sm()
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(rgb(0xdce4f3))
+                                        .child(ui_icon(IconName::Volume2, 13.0, 0x16d9c0))
                                         .child("音频参数"),
                                 )
                                 .child(
@@ -2391,9 +2624,13 @@ impl Render for MeetingHostShell {
                                 .gap_2()
                                 .child(
                                     div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
                                         .text_sm()
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(rgb(0xdce4f3))
+                                        .child(ui_icon(IconName::Globe, 13.0, 0x16d9c0))
                                         .child("平台适配"),
                                 )
                                 .child(
@@ -2422,9 +2659,13 @@ impl Render for MeetingHostShell {
                                 .gap_2()
                                 .child(
                                     div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
                                         .text_sm()
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(rgb(0xdce4f3))
+                                        .child(ui_icon(IconName::Info, 13.0, 0x16d9c0))
                                         .child("会话显示"),
                                 )
                                 .child(
@@ -2502,9 +2743,13 @@ impl Render for MeetingHostShell {
                                 .gap_2()
                                 .child(
                                     div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
                                         .text_sm()
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(rgb(0xdce4f3))
+                                        .child(ui_icon(IconName::FileCode, 13.0, 0x16d9c0))
                                         .child("工程信息"),
                                 )
                                 .child(
@@ -2707,6 +2952,21 @@ fn render_level_meter(label: &str, level_percent: usize, active: bool) -> impl I
         .child(row)
 }
 
+fn ui_icon(name: IconName, size_px: f32, color_hex: u32) -> gpui::Svg {
+    icon(name, size_px, rgb(color_hex))
+}
+
+fn audio_device_icon(name: &str) -> IconName {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("blackhole") || lower.contains("loopback") || lower.contains("virtual") {
+        IconName::Cable
+    } else if lower.contains("airpods") || lower.contains("headphone") {
+        IconName::Headphones
+    } else {
+        IconName::MonitorSpeaker
+    }
+}
+
 fn setting_row(label: impl Into<SharedString>, value: impl Into<SharedString>) -> impl IntoElement {
     div()
         .h_10()
@@ -2765,59 +3025,61 @@ fn insert_history_chat_messages(
 }
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
+    Application::new()
+        .with_assets(AppAssets::new())
+        .run(|cx: &mut App| {
+            let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
 
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT))),
-                ..Default::default()
-            },
-            |_window, cx| {
-                let audio_state = load_audio_device_state();
-                cx.new(move |cx| MeetingHostShell {
-                    connection_state: ConnectionState::Idle,
-                    gateway_status: GatewayStatus::Idle,
-                    ws_url: DEFAULT_WS_URL.into(),
-                    session_id: None,
-                    uplink_audio_frames: 0,
-                    uplink_audio_bytes: 0,
-                    uplink_streaming: false,
-                    downlink_audio_frames: 0,
-                    downlink_audio_bytes: 0,
-                    ws_command_tx: None,
-                    text_draft: String::new(),
-                    text_input_selected_range: 0..0,
-                    text_input_selection_reversed: false,
-                    text_input_marked_range: None,
-                    text_input_focus: cx.focus_handle(),
-                    chat_scroll: ScrollHandle::new(),
-                    settings_scroll: ScrollHandle::new(),
-                    input_devices: audio_state.input_devices,
-                    output_devices: audio_state.output_devices,
-                    selected_input_index: audio_state.selected_input_index,
-                    selected_input_output_index: audio_state.selected_input_output_index,
-                    input_from_output: audio_state.input_from_output,
-                    selected_output_index: audio_state.selected_output_index,
-                    show_input_dropdown: false,
-                    show_output_dropdown: false,
-                    show_settings_panel: false,
-                    speaker_output_enabled: true,
-                    show_ai_emotion_messages: false,
-                    chat_messages: load_history_chat_messages(),
-                    pending_detect_requests: VecDeque::new(),
-                    active_tts_message_index: None,
-                    active_intent_trace_message_index: None,
-                    follow_latest_chat_messages: true,
-                    pending_chat_messages: 0,
-                })
-            },
-        )
-        .expect("open GPUI window failed");
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT))),
+                    ..Default::default()
+                },
+                |_window, cx| {
+                    let audio_state = load_audio_device_state();
+                    cx.new(move |cx| MeetingHostShell {
+                        connection_state: ConnectionState::Idle,
+                        gateway_status: GatewayStatus::Idle,
+                        ws_url: DEFAULT_WS_URL.into(),
+                        session_id: None,
+                        uplink_audio_frames: 0,
+                        uplink_audio_bytes: 0,
+                        uplink_streaming: false,
+                        downlink_audio_frames: 0,
+                        downlink_audio_bytes: 0,
+                        ws_command_tx: None,
+                        text_draft: String::new(),
+                        text_input_selected_range: 0..0,
+                        text_input_selection_reversed: false,
+                        text_input_marked_range: None,
+                        text_input_focus: cx.focus_handle(),
+                        chat_scroll: ScrollHandle::new(),
+                        settings_scroll: ScrollHandle::new(),
+                        input_devices: audio_state.input_devices,
+                        output_devices: audio_state.output_devices,
+                        selected_input_index: audio_state.selected_input_index,
+                        selected_input_output_index: audio_state.selected_input_output_index,
+                        input_from_output: audio_state.input_from_output,
+                        selected_output_index: audio_state.selected_output_index,
+                        show_input_dropdown: false,
+                        show_output_dropdown: false,
+                        show_settings_panel: false,
+                        speaker_output_enabled: true,
+                        show_ai_emotion_messages: false,
+                        chat_messages: load_history_chat_messages(),
+                        pending_detect_requests: VecDeque::new(),
+                        active_tts_message_index: None,
+                        active_intent_trace_message_index: None,
+                        follow_latest_chat_messages: true,
+                        pending_chat_messages: 0,
+                    })
+                },
+            )
+            .expect("open GPUI window failed");
 
-        cx.activate(true);
-    });
+            cx.activate(true);
+        });
 }
 
 fn build_gateway_config() -> WsGatewayConfig {
