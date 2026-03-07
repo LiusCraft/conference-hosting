@@ -1,12 +1,15 @@
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, FocusHandle, FontWeight,
-    KeyDownEvent, SharedString, Window, WindowBounds, WindowOptions,
+    canvas, div, prelude::*, px, rgb, rgba, size, Animation, AnimationExt as _, App, Application,
+    Bounds, Context, ElementInputHandler, EntityInputHandler, FocusHandle, FontWeight,
+    KeyDownEvent, ScrollHandle, SharedString, UTF16Selection, Window, WindowBounds, WindowOptions,
 };
 use host_core::{
     ClientTextMessage, GatewayStatus, HelloMessage, InboundTextMessage, AUDIO_FRAME_SAMPLES,
@@ -21,8 +24,8 @@ use serde_json::{Map, Value};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::mpsc;
 
-const WINDOW_WIDTH: f32 = 920.0;
-const WINDOW_HEIGHT: f32 = 600.0;
+const WINDOW_WIDTH: f32 = 1200.0;
+const WINDOW_HEIGHT: f32 = 700.0;
 const MAX_CHAT_MESSAGES: usize = 240;
 const OPUS_BITRATE_BPS: i32 = 16_000;
 const OPUS_COMPLEXITY: i32 = 5;
@@ -34,7 +37,6 @@ const DEFAULT_DEVICE_MAC: &str = "3b165ab4bb614dea85c7e880fa233803";
 const DEFAULT_DEVICE_NAME: &str = "Host GPUI Desktop";
 const DEFAULT_CLIENT_ID: &str = "resvpu932";
 const DEFAULT_TOKEN: &str = "your-token1";
-const DEFAULT_TEXT_PROMPT: &str = "Hello, this is a test text message from GPUI host.";
 const HOST_INPUT_DEVICE_ENV: &str = "HOST_INPUT_DEVICE";
 const HOST_OUTPUT_DEVICE_ENV: &str = "HOST_OUTPUT_DEVICE";
 
@@ -44,17 +46,6 @@ enum ConnectionState {
     Connecting,
     Connected,
     Disconnecting,
-}
-
-impl ConnectionState {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Idle => "Idle",
-            Self::Connecting => "Connecting",
-            Self::Connected => "Connected",
-            Self::Disconnecting => "Disconnecting",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,10 +68,7 @@ struct ChatMessage {
 #[derive(Debug)]
 enum GatewayCommand {
     Disconnect,
-    ListenStart,
-    ListenStop,
     DetectText(String),
-    SendSilenceFrame,
     StartUplinkStream,
     StopUplinkStream,
 }
@@ -121,7 +109,6 @@ impl AudioRoutingConfig {
 }
 
 struct MeetingHostShell {
-    title: SharedString,
     connection_state: ConnectionState,
     gateway_status: GatewayStatus,
     ws_url: SharedString,
@@ -133,17 +120,22 @@ struct MeetingHostShell {
     downlink_audio_bytes: usize,
     ws_command_tx: Option<mpsc::UnboundedSender<GatewayCommand>>,
     text_draft: String,
+    text_input_selected_range: Range<usize>,
+    text_input_selection_reversed: bool,
+    text_input_marked_range: Option<Range<usize>>,
     text_input_focus: FocusHandle,
+    chat_scroll: ScrollHandle,
+    settings_scroll: ScrollHandle,
     input_devices: Vec<String>,
     output_devices: Vec<String>,
     selected_input_index: Option<usize>,
     selected_input_output_index: Option<usize>,
     input_from_output: bool,
     selected_output_index: Option<usize>,
-    default_input_index: Option<usize>,
-    default_output_index: Option<usize>,
     show_input_dropdown: bool,
     show_output_dropdown: bool,
+    show_settings_panel: bool,
+    speaker_output_enabled: bool,
     chat_messages: Vec<ChatMessage>,
 }
 
@@ -247,6 +239,52 @@ impl MeetingHostShell {
         cx.notify();
     }
 
+    fn open_settings_panel(&mut self, cx: &mut Context<Self>) {
+        self.show_settings_panel = true;
+        self.show_input_dropdown = false;
+        self.show_output_dropdown = false;
+        cx.notify();
+    }
+
+    fn close_settings_panel(&mut self, cx: &mut Context<Self>) {
+        if !self.show_settings_panel {
+            return;
+        }
+        self.show_settings_panel = false;
+        cx.notify();
+    }
+
+    fn toggle_speaker_output(&mut self, cx: &mut Context<Self>) {
+        self.speaker_output_enabled = !self.speaker_output_enabled;
+        let state = if self.speaker_output_enabled {
+            "Output monitoring enabled"
+        } else {
+            "Output monitoring paused"
+        };
+        self.push_chat(ChatRole::System, "System", state);
+        cx.notify();
+    }
+
+    fn input_level_percent(&self) -> usize {
+        if !matches!(self.connection_state, ConnectionState::Connected) || !self.uplink_streaming {
+            return 0;
+        }
+
+        let pulse = self.uplink_audio_frames % 42;
+        (32 + pulse).min(100)
+    }
+
+    fn output_level_percent(&self) -> usize {
+        if !matches!(self.connection_state, ConnectionState::Connected)
+            || !self.speaker_output_enabled
+        {
+            return 0;
+        }
+
+        let pulse = self.downlink_audio_frames % 46;
+        (26 + pulse).min(100)
+    }
+
     fn select_input_device_index(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.input_devices.get(index).is_none() {
             self.push_chat(
@@ -298,103 +336,6 @@ impl MeetingHostShell {
         self.announce_audio_route_change("Output device selected", cx);
     }
 
-    fn cycle_input_device_prev(&mut self, cx: &mut Context<Self>) {
-        self.cycle_input_device(false, cx);
-    }
-
-    fn cycle_input_device_next(&mut self, cx: &mut Context<Self>) {
-        self.cycle_input_device(true, cx);
-    }
-
-    fn cycle_output_device_prev(&mut self, cx: &mut Context<Self>) {
-        self.cycle_output_device(false, cx);
-    }
-
-    fn cycle_output_device_next(&mut self, cx: &mut Context<Self>) {
-        self.cycle_output_device(true, cx);
-    }
-
-    fn use_default_output_device(&mut self, cx: &mut Context<Self>) {
-        self.selected_output_index = self.default_output_index;
-        self.announce_audio_route_change("Output device reset to default", cx);
-    }
-
-    fn use_default_input_device(&mut self, cx: &mut Context<Self>) {
-        self.selected_input_index = self.default_input_index;
-        self.input_from_output = false;
-        self.selected_input_output_index = None;
-        self.announce_audio_route_change("Input device reset to default", cx);
-    }
-
-    fn use_blackhole_output_device(&mut self, cx: &mut Context<Self>) {
-        if let Some(index) = self
-            .output_devices
-            .iter()
-            .position(|name| name.to_ascii_lowercase().contains("blackhole"))
-        {
-            self.selected_output_index = Some(index);
-            self.announce_audio_route_change("Output device switched to BlackHole", cx);
-            return;
-        }
-
-        self.push_chat(
-            ChatRole::Error,
-            "Error",
-            "Cannot find output device containing `BlackHole`",
-        );
-        cx.notify();
-    }
-
-    fn cycle_input_device(&mut self, forward: bool, cx: &mut Context<Self>) {
-        if self.input_from_output {
-            if self.output_devices.is_empty() {
-                self.push_chat(
-                    ChatRole::Error,
-                    "Error",
-                    "No output device available for loopback input",
-                );
-                cx.notify();
-                return;
-            }
-
-            self.selected_input_output_index = Some(cycle_index(
-                self.selected_input_output_index,
-                self.output_devices.len(),
-                forward,
-            ));
-            self.announce_audio_route_change("Loopback input selection updated", cx);
-            return;
-        }
-
-        if self.input_devices.is_empty() {
-            self.push_chat(ChatRole::Error, "Error", "No input device available");
-            cx.notify();
-            return;
-        }
-
-        self.selected_input_index = Some(cycle_index(
-            self.selected_input_index,
-            self.input_devices.len(),
-            forward,
-        ));
-        self.announce_audio_route_change("Input device selection updated", cx);
-    }
-
-    fn cycle_output_device(&mut self, forward: bool, cx: &mut Context<Self>) {
-        if self.output_devices.is_empty() {
-            self.push_chat(ChatRole::Error, "Error", "No output device available");
-            cx.notify();
-            return;
-        }
-
-        self.selected_output_index = Some(cycle_index(
-            self.selected_output_index,
-            self.output_devices.len(),
-            forward,
-        ));
-        self.announce_audio_route_change("Output device selection updated", cx);
-    }
-
     fn announce_audio_route_change(&mut self, reason: &str, cx: &mut Context<Self>) {
         let input_name = self.selected_input_device_label();
         let output_name = self.selected_output_device_name().unwrap_or("default");
@@ -432,14 +373,6 @@ impl MeetingHostShell {
         cx.notify();
     }
 
-    fn send_listen_start(&mut self, cx: &mut Context<Self>) {
-        self.send_gateway_command(GatewayCommand::ListenStart, cx);
-    }
-
-    fn send_listen_stop(&mut self, cx: &mut Context<Self>) {
-        self.send_gateway_command(GatewayCommand::ListenStop, cx);
-    }
-
     fn send_text_draft(&mut self, cx: &mut Context<Self>) {
         let text = self.text_draft.trim().to_string();
         if text.is_empty() {
@@ -455,10 +388,9 @@ impl MeetingHostShell {
         self.push_chat(ChatRole::User, "You", text.clone());
         self.send_gateway_command(GatewayCommand::DetectText(text), cx);
         self.text_draft.clear();
-    }
-
-    fn send_silence_frame(&mut self, cx: &mut Context<Self>) {
-        self.send_gateway_command(GatewayCommand::SendSilenceFrame, cx);
+        self.text_input_selected_range = 0..0;
+        self.text_input_selection_reversed = false;
+        self.text_input_marked_range = None;
     }
 
     fn toggle_uplink_stream(&mut self, cx: &mut Context<Self>) {
@@ -474,6 +406,80 @@ impl MeetingHostShell {
         window.focus(&self.text_input_focus);
     }
 
+    fn blur_text_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.text_input_focus.is_focused(window) {
+            window.blur();
+            cx.notify();
+        }
+    }
+
+    fn text_cursor_offset(&self) -> usize {
+        if self.text_input_selection_reversed {
+            self.text_input_selected_range.start
+        } else {
+            self.text_input_selected_range.end
+        }
+    }
+
+    fn set_text_cursor(&mut self, offset: usize) {
+        self.text_input_selected_range = offset..offset;
+        self.text_input_selection_reversed = false;
+    }
+
+    fn text_draft_offset_from_utf16(&self, offset_utf16: usize) -> usize {
+        let mut utf8_offset = 0;
+        let mut utf16_count = 0;
+
+        for ch in self.text_draft.chars() {
+            if utf16_count >= offset_utf16 {
+                break;
+            }
+            utf16_count += ch.len_utf16();
+            utf8_offset += ch.len_utf8();
+        }
+
+        utf8_offset
+    }
+
+    fn text_draft_offset_to_utf16(&self, offset_utf8: usize) -> usize {
+        let mut utf16_offset = 0;
+        let mut utf8_count = 0;
+
+        for ch in self.text_draft.chars() {
+            if utf8_count >= offset_utf8 {
+                break;
+            }
+            utf8_count += ch.len_utf8();
+            utf16_offset += ch.len_utf16();
+        }
+
+        utf16_offset
+    }
+
+    fn text_draft_range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
+        self.text_draft_offset_to_utf16(range.start)..self.text_draft_offset_to_utf16(range.end)
+    }
+
+    fn text_draft_range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
+        let start = self.text_draft_offset_from_utf16(range_utf16.start);
+        let end = self.text_draft_offset_from_utf16(range_utf16.end);
+        if start <= end {
+            start..end
+        } else {
+            end..start
+        }
+    }
+
+    fn replace_text_draft_range(&mut self, range: Range<usize>, new_text: &str) {
+        self.text_draft =
+            (self.text_draft[0..range.start].to_owned() + new_text + &self.text_draft[range.end..])
+                .into();
+
+        let cursor = range.start + new_text.len();
+        self.set_text_cursor(cursor);
+        self.text_input_marked_range = None;
+    }
+
     fn handle_text_input_key(
         &mut self,
         event: &KeyDownEvent,
@@ -486,57 +492,44 @@ impl MeetingHostShell {
 
         let key = event.keystroke.key.as_str();
         if key == "enter" {
+            if self.text_input_marked_range.is_some() {
+                return;
+            }
             self.send_text_draft(cx);
             return;
         }
 
         if key == "backspace" {
-            let _ = self.text_draft.pop();
+            if let Some(range) = self.text_input_marked_range.clone().or_else(|| {
+                (!self.text_input_selected_range.is_empty())
+                    .then_some(self.text_input_selected_range.clone())
+            }) {
+                self.replace_text_draft_range(range, "");
+                cx.notify();
+                return;
+            }
+
+            let cursor = self.text_cursor_offset();
+            if cursor == 0 {
+                return;
+            }
+
+            let previous_boundary = self.text_draft[0..cursor]
+                .char_indices()
+                .last()
+                .map(|(index, _)| index)
+                .unwrap_or(0);
+            self.replace_text_draft_range(previous_boundary..cursor, "");
             cx.notify();
             return;
         }
 
         if key == "escape" {
             self.text_draft.clear();
-            cx.notify();
-            return;
-        }
-
-        if key == "space" {
-            self.text_draft.push(' ');
-            cx.notify();
-            return;
-        }
-
-        if event.keystroke.modifiers.control || event.keystroke.modifiers.platform {
-            return;
-        }
-
-        if let Some(ch) = event
-            .keystroke
-            .key_char
-            .as_deref()
-            .and_then(single_visible_char)
-        {
-            self.text_draft.push(ch);
-            cx.notify();
-            return;
-        }
-
-        if let Some(ch) = single_visible_char(event.keystroke.key.as_str()) {
-            self.text_draft.push(ch);
+            self.set_text_cursor(0);
+            self.text_input_marked_range = None;
             cx.notify();
         }
-    }
-
-    fn clear_chat(&mut self, cx: &mut Context<Self>) {
-        self.chat_messages.clear();
-        self.push_chat(
-            ChatRole::System,
-            "System",
-            "Chat history cleared (audio counters preserved)",
-        );
-        cx.notify();
     }
 
     fn send_gateway_command(&mut self, command: GatewayCommand, cx: &mut Context<Self>) {
@@ -656,736 +649,1506 @@ impl MeetingHostShell {
         }
     }
 
-    fn connect_button_label(&self) -> &'static str {
-        match self.connection_state {
-            ConnectionState::Idle => "Connect",
-            ConnectionState::Connecting => "Connecting...",
-            ConnectionState::Connected => "Disconnect",
-            ConnectionState::Disconnecting => "Disconnecting...",
-        }
-    }
-
-    fn status_color(&self) -> u32 {
-        match self.connection_state {
-            ConnectionState::Idle => 0x94a3b8,
-            ConnectionState::Connecting | ConnectionState::Disconnecting => 0xf59e0b,
-            ConnectionState::Connected => 0x34d399,
-        }
-    }
-
-    fn stream_button_label(&self) -> &'static str {
-        if self.uplink_streaming {
-            "Stop Uplink Stream"
-        } else {
-            "Start Uplink Stream"
-        }
-    }
-
     fn render_chat_message(&self, message: &ChatMessage) -> impl IntoElement {
-        let is_outgoing = matches!(message.role, ChatRole::Client);
-        let row = if is_outgoing {
-            div().flex().justify_end()
-        } else {
-            div().flex().justify_start()
-        };
-
-        let (bubble_bg, border_color, title_color, body_color) = match message.role {
-            ChatRole::System => (0x111827, 0x334155, 0x94a3b8, 0xe2e8f0),
-            ChatRole::Client => (0x1d4ed8, 0x60a5fa, 0xbfdbfe, 0xf8fafc),
-            ChatRole::User => (0x0f766e, 0x2dd4bf, 0x99f6e4, 0xf0fdfa),
-            ChatRole::Assistant => (0x312e81, 0x818cf8, 0xc7d2fe, 0xf5f3ff),
-            ChatRole::Tool => (0x4a044e, 0xc084fc, 0xe9d5ff, 0xfdf4ff),
-            ChatRole::Error => (0x7f1d1d, 0xf87171, 0xfecaca, 0xfff1f2),
-        };
-
-        row.child(
-            div()
+        match message.role {
+            ChatRole::System => div().flex().justify_center().py_1().child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .bg(rgb(0x0e1624))
+                    .border_1()
+                    .border_color(rgb(0x202a3b))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x6f7c90))
+                            .child(format!("{} | {}", message.title, message.body)),
+                    ),
+            ),
+            ChatRole::Tool => div().flex().min_w_0().px_4().py_1().gap_2().child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .flex_1()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0xd98a3c))
+                            .whitespace_normal()
+                            .child(message.body.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0x7f8899))
+                            .whitespace_normal()
+                            .child(message.title.clone()),
+                    ),
+            ),
+            ChatRole::Assistant => div()
                 .flex()
-                .flex_col()
-                .gap_1()
-                .px_3()
+                .min_w_0()
+                .items_start()
+                .gap_2()
+                .px_4()
                 .py_2()
-                .border_1()
-                .rounded_md()
-                .bg(rgb(bubble_bg))
-                .border_color(rgb(border_color))
                 .child(
                     div()
+                        .size_6()
+                        .rounded_md()
+                        .bg(rgb(0x042c2a))
+                        .border_1()
+                        .border_color(rgb(0x0f6b5f))
                         .text_xs()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(title_color))
-                        .child(message.title.clone()),
+                        .text_color(rgb(0x15d3be))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child("AI"),
                 )
                 .child(
                     div()
-                        .text_sm()
-                        .whitespace_normal()
-                        .text_color(rgb(body_color))
-                        .child(message.body.clone()),
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .flex_1()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x14b8a6))
+                                .whitespace_normal()
+                                .child(message.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_base()
+                                .text_color(rgb(0xdce5f6))
+                                .whitespace_normal()
+                                .child(message.body.clone()),
+                        ),
                 ),
-        )
+            ChatRole::User | ChatRole::Client => div()
+                .flex()
+                .min_w_0()
+                .items_start()
+                .gap_2()
+                .px_4()
+                .py_2()
+                .child(
+                    div()
+                        .size_6()
+                        .rounded_md()
+                        .bg(rgb(0x151b27))
+                        .border_1()
+                        .border_color(rgb(0x2a3446))
+                        .text_xs()
+                        .text_color(rgb(0x8a94a8))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child("STT"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .flex_1()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0x8b93a3))
+                                .whitespace_normal()
+                                .child(message.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_base()
+                                .text_color(rgb(0xc8d0de))
+                                .whitespace_normal()
+                                .child(message.body.clone()),
+                        ),
+                ),
+            ChatRole::Error => div()
+                .flex()
+                .min_w_0()
+                .items_start()
+                .gap_2()
+                .px_4()
+                .py_2()
+                .child(
+                    div()
+                        .size_6()
+                        .rounded_md()
+                        .bg(rgb(0x3b1116))
+                        .border_1()
+                        .border_color(rgb(0x8a1f2b))
+                        .text_xs()
+                        .text_color(rgb(0xfb7185))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child("ERR"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .flex_1()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(0xfda4af))
+                                .whitespace_normal()
+                                .child(message.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_base()
+                                .text_color(rgb(0xffd9df))
+                                .whitespace_normal()
+                                .child(message.body.clone()),
+                        ),
+                ),
+        }
     }
 }
 
 impl Render for MeetingHostShell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_connected = matches!(self.connection_state, ConnectionState::Connected);
+        let can_send_text = is_connected && !self.text_draft.trim().is_empty();
+        let is_text_input_focused = self.text_input_focus.is_focused(window);
+        let selected_input = self.selected_input_device_label();
+        let selected_output = self
+            .selected_output_device_name()
+            .unwrap_or("default")
+            .to_string();
+        let connection_status = match self.connection_state {
+            ConnectionState::Idle => ("DISCONNECTED", 0x202a3b, 0x7f8ba1, 0x506078),
+            ConnectionState::Connecting => ("CONNECTING", 0x3a280a, 0xf4b544, 0xf4b544),
+            ConnectionState::Connected => ("CONNECTED", 0x06332f, 0x16d9c0, 0x16d9c0),
+            ConnectionState::Disconnecting => ("DISCONNECTING", 0x3a280a, 0xf4b544, 0xf4b544),
+        };
+        let text_input_border_color = if is_text_input_focused {
+            rgb(0x16d9c0)
+        } else if self.text_draft.is_empty() {
+            rgb(0x283449)
+        } else {
+            rgb(0x145a58)
+        };
+
         let connect_button = match self.connection_state {
             ConnectionState::Idle => div()
                 .id("connect-button")
-                .px_4()
-                .py_2()
-                .border_1()
+                .w_full()
+                .h_10()
                 .rounded_md()
+                .border_1()
+                .border_color(rgb(0x17585d))
+                .bg(rgb(0x0f3d40))
+                .text_sm()
+                .text_color(rgb(0x95f8ef))
+                .font_weight(FontWeight::SEMIBOLD)
                 .cursor_pointer()
-                .border_color(rgb(0x7dd3fc))
-                .bg(rgb(0x0369a1))
-                .child(self.connect_button_label())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child("连接服务器")
                 .on_click(cx.listener(|view, _event, _window, cx| view.connect_gateway(cx))),
             ConnectionState::Connected => div()
-                .id("connect-button")
-                .px_4()
-                .py_2()
-                .border_1()
+                .id("disconnect-button")
+                .w_full()
+                .h_10()
                 .rounded_md()
+                .border_1()
+                .border_color(rgb(0x7f2230))
+                .bg(rgb(0x3a1219))
+                .text_sm()
+                .text_color(rgb(0xff99a6))
+                .font_weight(FontWeight::SEMIBOLD)
                 .cursor_pointer()
-                .border_color(rgb(0xfca5a5))
-                .bg(rgb(0x7f1d1d))
-                .child(self.connect_button_label())
+                .flex()
+                .items_center()
+                .justify_center()
+                .child("断开连接")
                 .on_click(cx.listener(|view, _event, _window, cx| view.disconnect_gateway(cx))),
-            ConnectionState::Connecting | ConnectionState::Disconnecting => div()
+            ConnectionState::Connecting => div()
                 .id("connect-button")
-                .px_4()
-                .py_2()
-                .border_1()
+                .w_full()
+                .h_10()
                 .rounded_md()
-                .border_color(rgb(0xf59e0b))
-                .bg(rgb(0x78350f))
-                .child(self.connect_button_label()),
+                .border_1()
+                .border_color(rgb(0x5c4720))
+                .bg(rgb(0x2d2411))
+                .text_sm()
+                .text_color(rgb(0xf4d190))
+                .font_weight(FontWeight::SEMIBOLD)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child("连接中..."),
+            ConnectionState::Disconnecting => div()
+                .id("connect-button")
+                .w_full()
+                .h_10()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(0x5c4720))
+                .bg(rgb(0x2d2411))
+                .text_sm()
+                .text_color(rgb(0xf4d190))
+                .font_weight(FontWeight::SEMIBOLD)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child("断开中..."),
         };
 
-        let can_control = matches!(self.connection_state, ConnectionState::Connected);
-        let listen_start_button = if can_control {
-            div()
-                .id("listen-start-button")
-                .px_3()
-                .py_2()
-                .border_1()
-                .rounded_md()
-                .cursor_pointer()
-                .border_color(rgb(0x6ee7b7))
-                .bg(rgb(0x065f46))
-                .child("Listen Start")
-                .on_click(cx.listener(|view, _event, _window, cx| view.send_listen_start(cx)))
-        } else {
-            div()
-                .id("listen-start-button")
-                .px_3()
-                .py_2()
-                .border_1()
-                .rounded_md()
-                .border_color(rgb(0x64748b))
-                .bg(rgb(0x1e293b))
-                .child("Listen Start")
-        };
+        let input_selector_button = div()
+            .id("input-selector-button")
+            .w_full()
+            .h_10()
+            .px_3()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(0x233043))
+            .bg(rgb(0x0b121f))
+            .cursor_pointer()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0xd2d9e7))
+                    .text_ellipsis()
+                    .child(selected_input.clone()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x7f8ba1))
+                    .child(if self.show_input_dropdown { "^" } else { "v" }),
+            )
+            .on_click(cx.listener(|view, _event, _window, cx| view.toggle_input_dropdown(cx)));
 
-        let listen_stop_button = if can_control {
-            div()
-                .id("listen-stop-button")
-                .px_3()
-                .py_2()
-                .border_1()
-                .rounded_md()
-                .cursor_pointer()
-                .border_color(rgb(0xfcd34d))
-                .bg(rgb(0x92400e))
-                .child("Listen Stop")
-                .on_click(cx.listener(|view, _event, _window, cx| view.send_listen_stop(cx)))
-        } else {
-            div()
-                .id("listen-stop-button")
-                .px_3()
-                .py_2()
-                .border_1()
-                .rounded_md()
-                .border_color(rgb(0x64748b))
-                .bg(rgb(0x1e293b))
-                .child("Listen Stop")
-        };
+        let mut input_selector = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x5f6d84))
+                    .child("输入源 (采集)"),
+            )
+            .child(input_selector_button);
 
-        let send_text_button = if can_control {
-            div()
-                .id("send-text-button")
-                .px_3()
-                .py_2()
-                .border_1()
+        if self.show_input_dropdown {
+            let mut input_dropdown = div()
+                .flex()
+                .flex_col()
                 .rounded_md()
-                .cursor_pointer()
-                .border_color(rgb(0xc4b5fd))
-                .bg(rgb(0x4338ca))
-                .child("Send Text")
-                .on_click(cx.listener(|view, _event, _window, cx| view.send_text_draft(cx)))
-        } else {
-            div()
-                .id("send-text-button")
-                .px_3()
-                .py_2()
                 .border_1()
-                .rounded_md()
-                .border_color(rgb(0x64748b))
-                .bg(rgb(0x1e293b))
-                .child("Send Text")
-        };
+                .border_color(rgb(0x243145))
+                .bg(rgb(0x0d1422))
+                .overflow_hidden();
 
-        let uplink_stream_button = if can_control {
+            if self.input_devices.is_empty() {
+                input_dropdown = input_dropdown.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_xs()
+                        .text_color(rgb(0x7f8ba1))
+                        .child("No input devices"),
+                );
+            } else {
+                for (index, name) in self.input_devices.iter().enumerate() {
+                    let selected =
+                        !self.input_from_output && self.selected_input_index == Some(index);
+                    let mut row = div()
+                        .id(("input-device", index))
+                        .px_3()
+                        .py_2()
+                        .text_sm()
+                        .cursor_pointer()
+                        .text_ellipsis()
+                        .on_click(cx.listener(move |view, _event, _window, cx| {
+                            view.select_input_device_index(index, cx)
+                        }));
+
+                    if selected {
+                        row = row.bg(rgb(0x10343a)).text_color(rgb(0x6df3e2));
+                    } else {
+                        row = row.bg(rgb(0x0d1422)).text_color(rgb(0xcbd5e5));
+                    }
+
+                    input_dropdown = input_dropdown.child(row.child(name.clone()));
+                }
+            }
+
+            input_dropdown = input_dropdown.child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(rgb(0x7f8ba1))
+                    .bg(rgb(0x0a101c))
+                    .child("输出回采 (loopback)"),
+            );
+
+            if self.output_devices.is_empty() {
+                input_dropdown = input_dropdown.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_xs()
+                        .text_color(rgb(0x7f8ba1))
+                        .child("No output devices"),
+                );
+            } else {
+                for (index, name) in self.output_devices.iter().enumerate() {
+                    let selected =
+                        self.input_from_output && self.selected_input_output_index == Some(index);
+                    let mut row = div()
+                        .id(("loopback-device", index))
+                        .px_3()
+                        .py_2()
+                        .text_sm()
+                        .cursor_pointer()
+                        .text_ellipsis()
+                        .on_click(cx.listener(move |view, _event, _window, cx| {
+                            view.select_input_from_output_index(index, cx)
+                        }));
+
+                    if selected {
+                        row = row.bg(rgb(0x10343a)).text_color(rgb(0x6df3e2));
+                    } else {
+                        row = row.bg(rgb(0x0d1422)).text_color(rgb(0xcbd5e5));
+                    }
+
+                    input_dropdown = input_dropdown.child(row.child(format!("loopback: {name}")));
+                }
+            }
+
+            input_selector = input_selector.child(input_dropdown);
+        }
+
+        let output_selector_button = div()
+            .id("output-selector-button")
+            .w_full()
+            .h_10()
+            .px_3()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(0x233043))
+            .bg(rgb(0x0b121f))
+            .cursor_pointer()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0xd2d9e7))
+                    .text_ellipsis()
+                    .child(selected_output.clone()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x7f8ba1))
+                    .child(if self.show_output_dropdown { "^" } else { "v" }),
+            )
+            .on_click(cx.listener(|view, _event, _window, cx| view.toggle_output_dropdown(cx)));
+
+        let mut output_selector = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(0x5f6d84))
+                    .child("输出源 (播放)"),
+            )
+            .child(output_selector_button);
+
+        if self.show_output_dropdown {
+            let mut output_dropdown = div()
+                .flex()
+                .flex_col()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(0x243145))
+                .bg(rgb(0x0d1422))
+                .overflow_hidden();
+
+            if self.output_devices.is_empty() {
+                output_dropdown = output_dropdown.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_xs()
+                        .text_color(rgb(0x7f8ba1))
+                        .child("No output devices"),
+                );
+            } else {
+                for (index, name) in self.output_devices.iter().enumerate() {
+                    let selected = self.selected_output_index == Some(index);
+                    let mut row = div()
+                        .id(("output-device", index))
+                        .px_3()
+                        .py_2()
+                        .text_sm()
+                        .cursor_pointer()
+                        .text_ellipsis()
+                        .on_click(cx.listener(move |view, _event, _window, cx| {
+                            view.select_output_device_index(index, cx)
+                        }));
+
+                    if selected {
+                        row = row.bg(rgb(0x10343a)).text_color(rgb(0x6df3e2));
+                    } else {
+                        row = row.bg(rgb(0x0d1422)).text_color(rgb(0xcbd5e5));
+                    }
+
+                    output_dropdown = output_dropdown.child(row.child(name.clone()));
+                }
+            }
+
+            output_selector = output_selector.child(output_dropdown);
+        }
+
+        let mic_button = if is_connected {
             if self.uplink_streaming {
                 div()
-                    .id("uplink-stream-button")
+                    .id("mic-toggle")
+                    .w_full()
+                    .h_11()
                     .px_3()
-                    .py_2()
-                    .border_1()
                     .rounded_md()
+                    .border_1()
+                    .border_color(rgb(0x165e55))
+                    .bg(rgb(0x0c3f3b))
+                    .text_sm()
+                    .text_color(rgb(0x6af3e2))
                     .cursor_pointer()
-                    .border_color(rgb(0xfca5a5))
-                    .bg(rgb(0x7f1d1d))
-                    .child(self.stream_button_label())
+                    .flex()
+                    .items_center()
+                    .child("采集中")
                     .on_click(
                         cx.listener(|view, _event, _window, cx| view.toggle_uplink_stream(cx)),
                     )
             } else {
                 div()
-                    .id("uplink-stream-button")
+                    .id("mic-toggle")
+                    .w_full()
+                    .h_11()
                     .px_3()
-                    .py_2()
-                    .border_1()
                     .rounded_md()
+                    .border_1()
+                    .border_color(rgb(0x2e384b))
+                    .bg(rgb(0x131b2a))
+                    .text_sm()
+                    .text_color(rgb(0x8a96ab))
                     .cursor_pointer()
-                    .border_color(rgb(0xfcd34d))
-                    .bg(rgb(0x854d0e))
-                    .child(self.stream_button_label())
+                    .flex()
+                    .items_center()
+                    .child("采集已暂停")
                     .on_click(
                         cx.listener(|view, _event, _window, cx| view.toggle_uplink_stream(cx)),
                     )
             }
         } else {
             div()
-                .id("uplink-stream-button")
+                .id("mic-toggle")
+                .w_full()
+                .h_11()
                 .px_3()
-                .py_2()
-                .border_1()
                 .rounded_md()
-                .border_color(rgb(0x64748b))
-                .bg(rgb(0x1e293b))
-                .child(self.stream_button_label())
+                .border_1()
+                .border_color(rgb(0x2e384b))
+                .bg(rgb(0x131b2a))
+                .text_sm()
+                .text_color(rgb(0x8a96ab))
+                .flex()
+                .items_center()
+                .child("采集中")
         };
 
-        let send_silence_button = if can_control {
+        let speaker_button = if self.speaker_output_enabled {
             div()
-                .id("send-silence-button")
+                .id("speaker-toggle")
+                .w_full()
+                .h_11()
                 .px_3()
-                .py_2()
-                .border_1()
                 .rounded_md()
+                .border_1()
+                .border_color(rgb(0x165e55))
+                .bg(rgb(0x0c3f3b))
+                .text_sm()
+                .text_color(rgb(0x6af3e2))
                 .cursor_pointer()
-                .border_color(rgb(0x93c5fd))
-                .bg(rgb(0x1e3a8a))
-                .child("Send 1 Silent Opus Packet")
-                .on_click(cx.listener(|view, _event, _window, cx| view.send_silence_frame(cx)))
+                .flex()
+                .items_center()
+                .child("播放中")
+                .on_click(cx.listener(|view, _event, _window, cx| view.toggle_speaker_output(cx)))
         } else {
             div()
-                .id("send-silence-button")
+                .id("speaker-toggle")
+                .w_full()
+                .h_11()
                 .px_3()
-                .py_2()
-                .border_1()
                 .rounded_md()
-                .border_color(rgb(0x64748b))
-                .bg(rgb(0x1e293b))
-                .child("Send 1 Silent Opus Packet")
+                .border_1()
+                .border_color(rgb(0x2e384b))
+                .bg(rgb(0x131b2a))
+                .text_sm()
+                .text_color(rgb(0x8a96ab))
+                .cursor_pointer()
+                .flex()
+                .items_center()
+                .child("播放已暂停")
+                .on_click(cx.listener(|view, _event, _window, cx| view.toggle_speaker_output(cx)))
         };
 
-        let clear_chat_button = div()
-            .id("clear-chat-button")
-            .px_3()
-            .py_2()
-            .border_1()
-            .rounded_md()
-            .cursor_pointer()
-            .border_color(rgb(0x94a3b8))
-            .bg(rgb(0x334155))
-            .child("Clear")
-            .on_click(cx.listener(|view, _event, _window, cx| view.clear_chat(cx)));
-
-        let input_prev_button = div()
-            .id("input-prev-button")
-            .px_2()
-            .py_2()
-            .border_1()
-            .rounded_md()
-            .cursor_pointer()
-            .border_color(rgb(0x7dd3fc))
-            .bg(rgb(0x0c4a6e))
-            .child("In <")
-            .on_click(cx.listener(|view, _event, _window, cx| view.cycle_input_device_prev(cx)));
-
-        let input_next_button = div()
-            .id("input-next-button")
-            .px_2()
-            .py_2()
-            .border_1()
-            .rounded_md()
-            .cursor_pointer()
-            .border_color(rgb(0x7dd3fc))
-            .bg(rgb(0x0c4a6e))
-            .child("In >")
-            .on_click(cx.listener(|view, _event, _window, cx| view.cycle_input_device_next(cx)));
-
-        let output_prev_button = div()
-            .id("output-prev-button")
-            .px_2()
-            .py_2()
-            .border_1()
-            .rounded_md()
-            .cursor_pointer()
-            .border_color(rgb(0xa7f3d0))
-            .bg(rgb(0x064e3b))
-            .child("Out <")
-            .on_click(cx.listener(|view, _event, _window, cx| view.cycle_output_device_prev(cx)));
-
-        let output_next_button = div()
-            .id("output-next-button")
-            .px_2()
-            .py_2()
-            .border_1()
-            .rounded_md()
-            .cursor_pointer()
-            .border_color(rgb(0xa7f3d0))
-            .bg(rgb(0x064e3b))
-            .child("Out >")
-            .on_click(cx.listener(|view, _event, _window, cx| view.cycle_output_device_next(cx)));
-
-        let blackhole_button = div()
-            .id("blackhole-button")
-            .px_2()
-            .py_2()
-            .border_1()
-            .rounded_md()
-            .cursor_pointer()
-            .border_color(rgb(0xfde68a))
-            .bg(rgb(0x78350f))
-            .child("Use BlackHole")
-            .on_click(
-                cx.listener(|view, _event, _window, cx| view.use_blackhole_output_device(cx)),
-            );
-
-        let default_input_button = div()
-            .id("default-input-button")
-            .px_2()
-            .py_2()
-            .border_1()
-            .rounded_md()
-            .cursor_pointer()
-            .border_color(rgb(0xcbd5e1))
-            .bg(rgb(0x334155))
-            .child("Use Default In")
-            .on_click(cx.listener(|view, _event, _window, cx| view.use_default_input_device(cx)));
-
-        let default_output_button = div()
-            .id("default-output-button")
-            .px_2()
-            .py_2()
-            .border_1()
-            .rounded_md()
-            .cursor_pointer()
-            .border_color(rgb(0xcbd5e1))
-            .bg(rgb(0x334155))
-            .child("Use Default Out")
-            .on_click(cx.listener(|view, _event, _window, cx| view.use_default_output_device(cx)));
-
-        let input_dropdown_button = if self.show_input_dropdown {
-            div()
-                .id("input-dropdown-button")
-                .px_2()
-                .py_2()
-                .border_1()
-                .rounded_md()
-                .cursor_pointer()
-                .border_color(rgb(0x93c5fd))
-                .bg(rgb(0x1d4ed8))
-                .child("Input List ▲")
-                .on_click(cx.listener(|view, _event, _window, cx| view.toggle_input_dropdown(cx)))
-        } else {
-            div()
-                .id("input-dropdown-button")
-                .px_2()
-                .py_2()
-                .border_1()
-                .rounded_md()
-                .cursor_pointer()
-                .border_color(rgb(0x93c5fd))
-                .bg(rgb(0x0f172a))
-                .child("Input List ▼")
-                .on_click(cx.listener(|view, _event, _window, cx| view.toggle_input_dropdown(cx)))
-        };
-
-        let output_dropdown_button = if self.show_output_dropdown {
-            div()
-                .id("output-dropdown-button")
-                .px_2()
-                .py_2()
-                .border_1()
-                .rounded_md()
-                .cursor_pointer()
-                .border_color(rgb(0x86efac))
-                .bg(rgb(0x166534))
-                .child("Output List ▲")
-                .on_click(cx.listener(|view, _event, _window, cx| view.toggle_output_dropdown(cx)))
-        } else {
-            div()
-                .id("output-dropdown-button")
-                .px_2()
-                .py_2()
-                .border_1()
-                .rounded_md()
-                .cursor_pointer()
-                .border_color(rgb(0x86efac))
-                .bg(rgb(0x0f172a))
-                .child("Output List ▼")
-                .on_click(cx.listener(|view, _event, _window, cx| view.toggle_output_dropdown(cx)))
-        };
-
-        let mut input_dropdown_panel = div()
-            .id("input-dropdown-panel")
+        let sidebar = div()
+            .w_72()
+            .h_full()
+            .flex_none()
             .flex()
             .flex_col()
-            .gap_1()
-            .px_3()
-            .py_2()
-            .border_1()
-            .rounded_md()
-            .border_color(rgb(0x0ea5e9))
-            .bg(rgb(0x0b2239))
+            .min_h_0()
+            .bg(rgb(0x050a14))
+            .border_r_1()
+            .border_color(rgb(0x1a2232))
+            .overflow_hidden()
             .child(
                 div()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(0xbae6fd))
-                    .child("Input Devices"),
-            );
-
-        if self.input_devices.is_empty() {
-            input_dropdown_panel = input_dropdown_panel.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0x94a3b8))
-                    .child("No input devices"),
-            );
-        } else {
-            for (index, name) in self.input_devices.iter().enumerate() {
-                let selected = !self.input_from_output && self.selected_input_index == Some(index);
-                let mut row = div()
-                    .id(("input-device", index))
-                    .px_2()
-                    .py_1()
-                    .border_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |view, _event, _window, cx| {
-                        view.select_input_device_index(index, cx)
-                    }));
-
-                if selected {
-                    row = row
-                        .border_color(rgb(0x7dd3fc))
-                        .bg(rgb(0x1d4ed8))
-                        .text_color(rgb(0xeff6ff));
-                } else {
-                    row = row
-                        .border_color(rgb(0x334155))
-                        .bg(rgb(0x0f172a))
-                        .text_color(rgb(0xcbd5e1));
-                }
-
-                input_dropdown_panel = input_dropdown_panel
-                    .child(row.child(div().text_xs().whitespace_normal().child(name.clone())));
-            }
-        }
-
-        input_dropdown_panel = input_dropdown_panel.child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(0xa7f3d0))
-                .child("Output Loopback Sources"),
-        );
-
-        if self.output_devices.is_empty() {
-            input_dropdown_panel = input_dropdown_panel.child(
-                div()
-                    .text_xs()
-                    .text_color(rgb(0x94a3b8))
-                    .child("No output devices for loopback"),
-            );
-        } else {
-            for (index, name) in self.output_devices.iter().enumerate() {
-                let selected =
-                    self.input_from_output && self.selected_input_output_index == Some(index);
-                let mut row = div()
-                    .id(("input-loopback-device", index))
-                    .px_2()
-                    .py_1()
-                    .border_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |view, _event, _window, cx| {
-                        view.select_input_from_output_index(index, cx)
-                    }));
-
-                if selected {
-                    row = row
-                        .border_color(rgb(0x86efac))
-                        .bg(rgb(0x166534))
-                        .text_color(rgb(0xf0fdf4));
-                } else {
-                    row = row
-                        .border_color(rgb(0x334155))
-                        .bg(rgb(0x0f172a))
-                        .text_color(rgb(0xcbd5e1));
-                }
-
-                input_dropdown_panel = input_dropdown_panel.child(
-                    row.child(
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_4()
+                    .border_b_1()
+                    .border_color(rgb(0x1a2232))
+                    .child(
                         div()
-                            .text_xs()
-                            .whitespace_normal()
-                            .child(format!("loopback: {name}")),
-                    ),
-                );
-            }
-        }
-
-        let mut output_dropdown_panel = div()
-            .id("output-dropdown-panel")
-            .flex()
-            .flex_col()
-            .gap_1()
-            .px_3()
-            .py_2()
-            .border_1()
-            .rounded_md()
-            .border_color(rgb(0x22c55e))
-            .bg(rgb(0x0b2a1a))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div().size_2().rounded_full().bg(rgb(connection_status.3)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_lg()
+                                            .text_color(rgb(0xd5deee))
+                                            .child("WebSocket"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(connection_status.1))
+                                    .text_xs()
+                                    .text_color(rgb(connection_status.2))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(connection_status.0),
+                            ),
+                    )
+                    .children(if is_connected {
+                        Some(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_4()
+                                .text_xs()
+                                .text_color(rgb(0x7f8ba1))
+                                .child("RTT 48ms")
+                                .child("50 fps"),
+                        )
+                    } else {
+                        None
+                    })
+                    .child(connect_button),
+            )
             .child(
                 div()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(0xbbf7d0))
-                    .child("Output Devices"),
-            );
-
-        if self.output_devices.is_empty() {
-            output_dropdown_panel = output_dropdown_panel.child(
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .p_4()
+                    .border_b_1()
+                    .border_color(rgb(0x1a2232))
+                    .child(div().text_sm().text_color(rgb(0x66758b)).child("音频设备"))
+                    .child(input_selector)
+                    .child(output_selector),
+            )
+            .child(
                 div()
-                    .text_xs()
-                    .text_color(rgb(0x94a3b8))
-                    .child("No output devices"),
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_4()
+                    .border_b_1()
+                    .border_color(rgb(0x1a2232))
+                    .child(div().text_sm().text_color(rgb(0x66758b)).child("电平指示"))
+                    .child(render_level_meter(
+                        "INPUT",
+                        self.input_level_percent(),
+                        is_connected && self.uplink_streaming,
+                    ))
+                    .child(render_level_meter(
+                        "OUTPUT",
+                        self.output_level_percent(),
+                        is_connected && self.speaker_output_enabled,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_4()
+                    .border_b_1()
+                    .border_color(rgb(0x1a2232))
+                    .child(mic_button)
+                    .child(speaker_button),
+            )
+            .child(
+                div().mt_auto().p_4().child(
+                    div()
+                        .id("open-settings-button")
+                        .text_sm()
+                        .text_color(rgb(0x8a96ab))
+                        .cursor_pointer()
+                        .child("设置")
+                        .on_click(
+                            cx.listener(|view, _event, _window, cx| view.open_settings_panel(cx)),
+                        ),
+                ),
             );
+
+        let chat_title = format!("{} 条消息", self.chat_messages.len());
+        let chat_placeholder_text = if is_connected {
+            "输入指令 (例: listen detect)"
         } else {
-            for (index, name) in self.output_devices.iter().enumerate() {
-                let selected = self.selected_output_index == Some(index);
-                let mut row = div()
-                    .id(("output-device", index))
-                    .px_2()
-                    .py_1()
-                    .border_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |view, _event, _window, cx| {
-                        view.select_output_device_index(index, cx)
-                    }));
-
-                if selected {
-                    row = row
-                        .border_color(rgb(0x86efac))
-                        .bg(rgb(0x166534))
-                        .text_color(rgb(0xf0fdf4));
-                } else {
-                    row = row
-                        .border_color(rgb(0x334155))
-                        .bg(rgb(0x0f172a))
-                        .text_color(rgb(0xcbd5e1));
-                }
-
-                output_dropdown_panel = output_dropdown_panel
-                    .child(row.child(div().text_xs().whitespace_normal().child(name.clone())));
-            }
-        }
-
-        let mut device_dropdowns = div().flex().flex_wrap().gap_2();
-        if self.show_input_dropdown {
-            device_dropdowns = device_dropdowns.child(input_dropdown_panel);
-        }
-        if self.show_output_dropdown {
-            device_dropdowns = device_dropdowns.child(output_dropdown_panel);
-        }
-
-        let selected_input = self.selected_input_device_label();
-        let selected_output = self.selected_output_device_name().unwrap_or("default");
-        let route_apply_hint = if matches!(self.connection_state, ConnectionState::Idle) {
-            ""
-        } else {
-            " (reconnect to apply)"
+            "请先连接 WebSocket..."
         };
-
-        let draft_text = if self.text_draft.is_empty() {
-            "Type message here, press Enter to send...".to_string()
+        let show_placeholder = self.text_draft.is_empty() && !is_text_input_focused;
+        let chat_input_text = if show_placeholder {
+            chat_placeholder_text.to_string()
         } else {
             self.text_draft.clone()
         };
+        let text_input_focus_handle = self.text_input_focus.clone();
+        let text_input_entity = cx.entity();
 
         let text_input_box =
             div()
                 .id("text-draft-input")
                 .track_focus(&self.text_input_focus)
                 .on_click(cx.listener(|view, _event, window, cx| view.focus_text_input(window, cx)))
+                .on_mouse_down_out(
+                    cx.listener(|view, _event, window, cx| view.blur_text_input(window, cx)),
+                )
                 .on_key_down(cx.listener(|view, event, window, cx| {
                     view.handle_text_input_key(event, window, cx)
                 }))
-                .px_3()
-                .py_2()
                 .flex_1()
-                .border_1()
+                .h_11()
+                .px_3()
                 .rounded_md()
+                .border_1()
                 .cursor_text()
-                .border_color(if self.text_draft.is_empty() {
-                    rgb(0x475569)
-                } else {
-                    rgb(0x38bdf8)
-                })
-                .bg(rgb(0x0b1120))
+                .border_color(text_input_border_color)
+                .bg(rgb(0x090f1b))
+                .flex()
+                .items_center()
+                .justify_between()
                 .child(
                     div()
-                        .text_sm()
-                        .whitespace_normal()
-                        .text_color(if self.text_draft.is_empty() {
-                            rgb(0x64748b)
-                        } else {
-                            rgb(0xe2e8f0)
-                        })
-                        .child(draft_text),
-                );
+                        .min_w_0()
+                        .flex_1()
+                        .relative()
+                        .flex()
+                        .items_center()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_lg()
+                                .text_color(if show_placeholder {
+                                    rgb(0x57657d)
+                                } else {
+                                    rgb(0xd8dfef)
+                                })
+                                .text_ellipsis()
+                                .child(chat_input_text),
+                        )
+                        .child(
+                            div()
+                                .id("text-input-caret")
+                                .w(px(2.0))
+                                .h(px(18.0))
+                                .rounded_sm()
+                                .bg(rgb(0x16d9c0))
+                                .with_animation(
+                                    "text-input-caret-blink",
+                                    Animation::new(Duration::from_millis(980)).repeat(),
+                                    move |this, delta| {
+                                        if !is_text_input_focused {
+                                            this.opacity(0.0)
+                                        } else if delta < 0.52 {
+                                            this.opacity(1.0)
+                                        } else {
+                                            this.opacity(0.0)
+                                        }
+                                    },
+                                ),
+                        )
+                        .child(
+                            canvas(
+                                |_, _, _| (),
+                                move |bounds, _, window, cx| {
+                                    window.handle_input(
+                                        &text_input_focus_handle,
+                                        ElementInputHandler::new(bounds, text_input_entity.clone()),
+                                        cx,
+                                    );
+                                },
+                            )
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full(),
+                        ),
+                )
+                .child(div().text_sm().text_color(rgb(0x4f5e76)).child("Enter"));
 
-        let mut chat_panel = div()
-            .id("chat-panel")
-            .flex_1()
+        let send_button = if can_send_text {
+            div()
+                .id("send-text-button")
+                .size_11()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(0x115f58))
+                .bg(rgb(0x0f5a54))
+                .text_color(rgb(0x9af9ef))
+                .cursor_pointer()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child("->")
+                .on_click(cx.listener(|view, _event, _window, cx| view.send_text_draft(cx)))
+        } else {
+            div()
+                .id("send-text-button")
+                .size_11()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(0x2a3448))
+                .bg(rgb(0x111928))
+                .text_color(rgb(0x556178))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child("->")
+        };
+
+        let mut message_stream = div()
+            .id("message-stream")
             .flex()
             .flex_col()
-            .gap_2()
-            .px_3()
-            .py_3()
+            .gap_1()
+            .flex_1()
+            .min_h_0()
+            .track_scroll(&self.chat_scroll)
             .overflow_y_scroll()
-            .border_1()
-            .rounded_md()
-            .border_color(rgb(0x334155))
-            .bg(rgb(0x0f172a));
+            .scrollbar_width(px(10.0))
+            .pr_2()
+            .py_3()
+            .bg(rgb(0x050912));
 
         if self.chat_messages.is_empty() {
-            chat_panel = chat_panel.child(
+            message_stream = message_stream.child(
                 div()
+                    .px_4()
+                    .py_3()
                     .text_sm()
-                    .text_color(rgb(0x94a3b8))
-                    .child("No text messages yet. Binary audio is counted but hidden from chat."),
+                    .text_color(rgb(0x7b8798))
+                    .child("暂无消息，连接后会显示实时会话记录。"),
             );
         } else {
-            chat_panel = chat_panel.children(
+            message_stream = message_stream.children(
                 self.chat_messages
                     .iter()
+                    .rev()
                     .map(|message| self.render_chat_message(message)),
             );
         }
 
-        div()
+        let chat_panel = div()
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .min_h_0()
             .flex()
             .flex_col()
-            .gap_3()
-            .size_full()
-            .px_4()
-            .py_4()
-            .bg(rgb(0x020617))
-            .text_color(rgb(0xe2e8f0))
+            .bg(rgb(0x040913))
             .child(
                 div()
+                    .h_10()
+                    .px_4()
+                    .border_b_1()
+                    .border_color(rgb(0x182132))
+                    .bg(rgb(0x070f1b))
                     .flex()
-                    .justify_between()
                     .items_center()
+                    .justify_between()
                     .child(
                         div()
                             .flex()
-                            .flex_col()
-                            .gap_1()
+                            .items_center()
+                            .gap_2()
+                            .child(div().text_lg().text_color(rgb(0xd7deec)).child("会话记录"))
                             .child(
                                 div()
-                                    .text_lg()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(self.title.clone()),
-                            )
-                            .child(div().text_sm().text_color(rgb(self.status_color())).child(
-                                format!(
-                                    "Connection: {} | Gateway: {}",
-                                    self.connection_state.label(),
-                                    self.gateway_status.as_label()
-                                ),
-                            ))
-                            .child(
-                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .bg(rgb(0x111928))
                                     .text_xs()
-                                    .text_color(rgb(0x94a3b8))
-                                    .child(format!("URL: {}", self.ws_url.as_ref())),
-                            )
-                            .child(div().text_xs().text_color(rgb(0x94a3b8)).child(format!(
-                                    "Session: {}",
-                                    self.session_id
-                                        .as_ref()
-                                        .map(SharedString::as_ref)
-                                        .unwrap_or("-")
-                                )))
-                            .child(
-                                div().text_xs().text_color(rgb(0x93c5fd)).child(format!(
-                                    "Audio route: in=[{}], out=[{}]{}",
-                                    selected_input, selected_output, route_apply_hint
-                                )),
+                                    .text_color(rgb(0x6f7c91))
+                                    .child(chat_title),
                             ),
                     )
-                    .child(connect_button),
+                    .children(if is_connected {
+                        Some(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .text_sm()
+                                .text_color(rgb(0x8b95a9))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(div().size_1p5().rounded_full().bg(rgb(0x16d9c0)))
+                                        .child("LIVE"),
+                                )
+                                .child("PCM 16kHz / Opus"),
+                        )
+                    } else {
+                        None
+                    }),
             )
+            .child(message_stream)
             .child(
                 div()
+                    .h_16()
+                    .px_4()
+                    .border_t_1()
+                    .border_color(rgb(0x182132))
+                    .bg(rgb(0x070f1b))
                     .flex()
-                    .flex_wrap()
                     .items_center()
                     .gap_2()
                     .child(text_input_box)
-                    .child(input_prev_button)
-                    .child(input_next_button)
-                    .child(output_prev_button)
-                    .child(output_next_button)
-                    .child(blackhole_button)
-                    .child(default_input_button)
-                    .child(default_output_button)
-                    .child(input_dropdown_button)
-                    .child(output_dropdown_button)
-                    .child(listen_start_button)
-                    .child(listen_stop_button)
-                    .child(send_text_button)
-                    .child(uplink_stream_button)
-                    .child(send_silence_button)
-                    .child(clear_chat_button),
+                    .child(send_button),
+            );
+
+        let status_bar = div()
+            .h_8()
+            .px_4()
+            .bg(rgb(0x070d19))
+            .border_t_1()
+            .border_color(rgb(0x182132))
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .text_sm()
+                    .text_color(rgb(0x6f7b8f))
+                    .child("CPU 2.3%")
+                    .child("RAM 48 MB")
+                    .children(if is_connected {
+                        Some(
+                            div()
+                                .text_color(rgb(0x16d9c0))
+                                .child("延迟 ~700ms (采集 20ms + 网络 50ms + ASR 200ms + LLM 300ms + TTS 130ms)"),
+                        )
+                    } else {
+                        None
+                    }),
             )
-            .child(device_dropdowns)
-            .child(div().text_sm().text_color(rgb(0x93c5fd)).child(format!(
-                "Audio counters -> uplink frames: {}, uplink bytes: {}, downlink frames: {}, downlink bytes: {}",
-                self.uplink_audio_frames, self.uplink_audio_bytes, self.downlink_audio_frames, self.downlink_audio_bytes
-            )))
-            .child(chat_panel)
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(0x7d8798))
+                    .child(wall_clock_label()),
+            );
+
+        let mut shell_body = div()
+            .relative()
+            .size_full()
+            .bg(rgb(0x040811))
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .min_h_0()
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(sidebar)
+                    .child(chat_panel),
+            )
+            .child(status_bar);
+
+        if self.show_settings_panel {
+            let settings_panel = div()
+                .w(px(560.0))
+                .max_h(px(640.0))
+                .flex()
+                .flex_col()
+                .rounded_xl()
+                .border_1()
+                .border_color(rgb(0x243045))
+                .bg(rgb(0x0b1019))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .h_12()
+                        .px_5()
+                        .border_b_1()
+                        .border_color(rgb(0x1a2435))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_xl()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0xe2e8f4))
+                                .child("设置"),
+                        )
+                        .child(
+                            div()
+                                .id("close-settings-button")
+                                .size_8()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(0x2a3548))
+                                .bg(rgb(0x131b2a))
+                                .text_color(rgb(0x8a96ab))
+                                .cursor_pointer()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child("x")
+                                .on_click(cx.listener(|view, _event, _window, cx| {
+                                    view.close_settings_panel(cx)
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("settings-scroll")
+                        .flex()
+                        .flex_col()
+                        .gap_5()
+                        .p_5()
+                        .track_scroll(&self.settings_scroll)
+                        .overflow_y_scroll()
+                        .scrollbar_width(px(10.0))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(0xdce4f3))
+                                        .child("WebSocket 服务器"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(rgb(0x1d283a))
+                                        .bg(rgb(0x101726))
+                                        .px_3()
+                                        .py_1()
+                                        .child(setting_row("地址", self.ws_url.clone()))
+                                        .child(setting_row("协议版本", "1"))
+                                        .child(setting_row("传输方式", "WebSocket Binary Frame")),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(0xdce4f3))
+                                        .child("认证信息"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(rgb(0x1d283a))
+                                        .bg(rgb(0x101726))
+                                        .px_3()
+                                        .py_1()
+                                        .child(setting_row("Authorization", "Bearer ****...a3f2"))
+                                        .child(setting_row(
+                                            "Device-Id",
+                                            env_or_default("HOST_DEVICE_ID", DEFAULT_DEVICE_MAC),
+                                        ))
+                                        .child(setting_row(
+                                            "Client-Id",
+                                            env_or_default("HOST_CLIENT_ID", DEFAULT_CLIENT_ID),
+                                        )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(0xdce4f3))
+                                        .child("音频参数"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(rgb(0x1d283a))
+                                        .bg(rgb(0x101726))
+                                        .px_3()
+                                        .py_1()
+                                        .child(setting_row("格式", "PCM 16bit"))
+                                        .child(setting_row(
+                                            "采样率",
+                                            format!("{} Hz", AUDIO_SAMPLE_RATE_HZ),
+                                        ))
+                                        .child(setting_row("声道", "Mono"))
+                                        .child(setting_row("帧时长", "20ms"))
+                                        .child(setting_row(
+                                            "帧大小",
+                                            format!("{} samples", AUDIO_FRAME_SAMPLES),
+                                        ))
+                                        .child(setting_row("发送频率", "50 帧/秒"))
+                                        .child(setting_row("编解码", "Opus (上行/下行)")),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(0xdce4f3))
+                                        .child("平台适配"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(rgb(0x1d283a))
+                                        .bg(rgb(0x101726))
+                                        .px_3()
+                                        .py_1()
+                                        .child(setting_row("操作系统", std::env::consts::OS))
+                                        .child(setting_row("输入设备", selected_input.clone()))
+                                        .child(setting_row("输出设备", selected_output.clone()))
+                                        .child(setting_row(
+                                            "连接状态",
+                                            self.gateway_status.as_label(),
+                                        )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(rgb(0xdce4f3))
+                                        .child("工程信息"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .rounded_lg()
+                                        .border_1()
+                                        .border_color(rgb(0x1d283a))
+                                        .bg(rgb(0x101726))
+                                        .px_3()
+                                        .py_1()
+                                        .child(setting_row("引擎", "Rust + GPUI"))
+                                        .child(setting_row("运行时", "Tokio async runtime"))
+                                        .child(setting_row("通信", "tokio-tungstenite + rustls"))
+                                        .child(setting_row("音频层", "cpal + opus"))
+                                        .child(setting_row("版本", "0.1.0-alpha")),
+                                ),
+                        ),
+                );
+
+            shell_body = shell_body.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .child(
+                        div()
+                            .id("settings-backdrop")
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .bg(rgba(0x020712d9))
+                            .on_click(cx.listener(|view, _event, _window, cx| {
+                                view.close_settings_panel(cx)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .p_6()
+                            .child(settings_panel),
+                    ),
+            );
+        }
+
+        div().size_full().bg(rgb(0x040811)).child(shell_body)
     }
+}
+
+impl EntityInputHandler for MeetingHostShell {
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let range = self.text_draft_range_from_utf16(&range_utf16);
+        adjusted_range.replace(self.text_draft_range_to_utf16(&range));
+        Some(self.text_draft[range].to_string())
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: self.text_draft_range_to_utf16(&self.text_input_selected_range),
+            reversed: self.text_input_selection_reversed,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.text_input_marked_range
+            .as_ref()
+            .map(|range| self.text_draft_range_to_utf16(range))
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.text_input_marked_range = None;
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = range_utf16
+            .as_ref()
+            .map(|range_utf16| self.text_draft_range_from_utf16(range_utf16))
+            .or(self.text_input_marked_range.clone())
+            .unwrap_or_else(|| self.text_input_selected_range.clone());
+
+        self.replace_text_draft_range(range, text);
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range_utf16: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let range = range_utf16
+            .as_ref()
+            .map(|range_utf16| self.text_draft_range_from_utf16(range_utf16))
+            .or(self.text_input_marked_range.clone())
+            .unwrap_or_else(|| self.text_input_selected_range.clone());
+
+        self.text_draft =
+            (self.text_draft[0..range.start].to_owned() + new_text + &self.text_draft[range.end..])
+                .into();
+
+        if !new_text.is_empty() {
+            self.text_input_marked_range = Some(range.start..range.start + new_text.len());
+        } else {
+            self.text_input_marked_range = None;
+        }
+
+        self.text_input_selected_range = new_selected_range_utf16
+            .as_ref()
+            .map(|range_utf16| self.text_draft_range_from_utf16(range_utf16))
+            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
+            .unwrap_or_else(|| {
+                let cursor = range.start + new_text.len();
+                cursor..cursor
+            });
+        self.text_input_selection_reversed = false;
+
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        element_bounds: Bounds<gpui::Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<gpui::Pixels>> {
+        Some(element_bounds)
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: gpui::Point<gpui::Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        Some(self.text_draft_offset_to_utf16(self.text_cursor_offset()))
+    }
+}
+
+fn render_level_meter(label: &str, level_percent: usize, active: bool) -> impl IntoElement {
+    let bars = 20usize;
+    let active_bars = (level_percent.min(100) * bars) / 100;
+
+    let mut row = div().flex().items_center().gap_0p5().h_4();
+    for index in 0..bars {
+        let bar_color = if !active || index >= active_bars {
+            0x161f2e
+        } else if index >= bars * 9 / 10 {
+            0x8f2236
+        } else if index >= bars * 7 / 10 {
+            0xb7792a
+        } else {
+            0x12a596
+        };
+
+        row = row.child(div().w_1().h_full().rounded_sm().bg(rgb(bar_color)));
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(0x65748b))
+                .child(label.to_string()),
+        )
+        .child(row)
+}
+
+fn setting_row(label: impl Into<SharedString>, value: impl Into<SharedString>) -> impl IntoElement {
+    div()
+        .h_10()
+        .border_b_1()
+        .border_color(rgb(0x1b2536))
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(0x7d8aa0))
+                .child(label.into()),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(0xd7e0f0))
+                .text_ellipsis()
+                .child(value.into()),
+        )
+}
+
+fn wall_clock_label() -> String {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        % 86_400;
+    let hour = elapsed / 3_600;
+    let minute = (elapsed % 3_600) / 60;
+    let second = elapsed % 60;
+    format!("{hour:02}:{minute:02}:{second:02}")
+}
+
+fn seed_mock_chat_messages() -> Vec<ChatMessage> {
+    vec![
+        ChatMessage {
+            role: ChatRole::Assistant,
+            title: "AI 14:25:08 | 9.8s".into(),
+            body: "建议把执行拆成三条线并行：内容生产、投放优化、转化闭环。每周做一次复盘，把预算从低 ROI 渠道挪到高 ROI 渠道。".into(),
+        },
+        ChatMessage {
+            role: ChatRole::User,
+            title: "STT 14:25:02".into(),
+            body: "那我们每周复盘时，核心看哪些看板数据？".into(),
+        },
+        ChatMessage {
+            role: ChatRole::Tool,
+            title: "14:24:56".into(),
+            body: "function_call: build_weekly_dashboard({\"metrics\": [\"CPL\", \"CVR\", \"Retention\", \"ROI\"]})".into(),
+        },
+        ChatMessage {
+            role: ChatRole::Assistant,
+            title: "AI 14:24:51 | 6.7s".into(),
+            body: "可以先把线索成本、转化率、7 日留存和渠道 ROI 放到同一张周报中，方便一眼比较渠道效率。".into(),
+        },
+        ChatMessage {
+            role: ChatRole::User,
+            title: "STT 14:24:47".into(),
+            body: "明白了，那执行上我们先从哪一块开始？".into(),
+        },
+        ChatMessage {
+            role: ChatRole::User,
+            title: "STT 14:24:30".into(),
+            body: "好的，这些指标看起来可行。我们接下来讨论一下时间节点。".into(),
+        },
+        ChatMessage {
+            role: ChatRole::Assistant,
+            title: "AI 14:24:06 | 15.1s".into(),
+            body: "核心 KPI 建议如下：第一，新增获客成本控制在 45 元以下；第二，短视频平台的自然流量增长目标 30%；第三，用户留存率从当前的 62% 提升到 70%；第四，ROI 整体目标不低于 3.5 倍。".into(),
+        },
+        ChatMessage {
+            role: ChatRole::Tool,
+            title: "14:24:03".into(),
+            body: "function_call: get_kpi_template({\"domain\": \"digital_marketing\", \"quarter\": \"Q2\"})".into(),
+        },
+        ChatMessage {
+            role: ChatRole::User,
+            title: "STT 14:24:02".into(),
+            body: "那关于 KPI 的设定呢？我们需要设定哪些关键指标？".into(),
+        },
+        ChatMessage {
+            role: ChatRole::Assistant,
+            title: "AI 14:23:38 | 12.5s".into(),
+            body: "建议将总预算的 40% 分配给短视频平台，包括抖音和视频号。25% 用于搜索引擎优化，20% 用于邮件营销自动化升级，剩余 15% 作为 A/B 测试预算。".into(),
+        },
+        ChatMessage {
+            role: ChatRole::User,
+            title: "STT 14:23:35".into(),
+            body: "这个建议不错，你能详细说一下具体的预算分配吗？".into(),
+        },
+        ChatMessage {
+            role: ChatRole::Assistant,
+            title: "AI 14:23:18 | 8.2s".into(),
+            body: "好的，我来做一些补充。根据第一季度的数据，我们在社交媒体渠道的转化率提升了 23%，建议第二季度加大在短视频平台的投入。".into(),
+        },
+        ChatMessage {
+            role: ChatRole::Tool,
+            title: "14:23:16".into(),
+            body: "function_call: analyze_context({\"topic\": \"Q2 marketing strategy\", \"participants\": 4})".into(),
+        },
+        ChatMessage {
+            role: ChatRole::User,
+            title: "STT 14:23:15".into(),
+            body: "大家好，今天我们来讨论一下第二季度的营销策略。".into(),
+        },
+        ChatMessage {
+            role: ChatRole::System,
+            title: "System 14:23:02".into(),
+            body: "开始音频采集: BlackHole 2ch (Loopback)".into(),
+        },
+        ChatMessage {
+            role: ChatRole::System,
+            title: "System 14:23:01".into(),
+            body: "hello 握手成功 | PCM 16kHz Mono 16bit 20ms".into(),
+        },
+        ChatMessage {
+            role: ChatRole::System,
+            title: "System 14:23:01".into(),
+            body: "WebSocket 连接已建立".into(),
+        },
+    ]
 }
 
 fn main() {
@@ -1395,14 +2158,12 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT))),
                 ..Default::default()
             },
             |_window, cx| {
                 let audio_state = load_audio_device_state();
-                let input_device_count = audio_state.input_devices.len();
-                let output_device_count = audio_state.output_devices.len();
                 cx.new(move |cx| MeetingHostShell {
-                    title: "AI Meeting Host Shell".into(),
                     connection_state: ConnectionState::Idle,
                     gateway_status: GatewayStatus::Idle,
                     ws_url: DEFAULT_WS_URL.into(),
@@ -1413,28 +2174,24 @@ fn main() {
                     downlink_audio_frames: 0,
                     downlink_audio_bytes: 0,
                     ws_command_tx: None,
-                    text_draft: DEFAULT_TEXT_PROMPT.to_string(),
+                    text_draft: String::new(),
+                    text_input_selected_range: 0..0,
+                    text_input_selection_reversed: false,
+                    text_input_marked_range: None,
                     text_input_focus: cx.focus_handle(),
+                    chat_scroll: ScrollHandle::new(),
+                    settings_scroll: ScrollHandle::new(),
                     input_devices: audio_state.input_devices,
                     output_devices: audio_state.output_devices,
                     selected_input_index: audio_state.selected_input_index,
                     selected_input_output_index: audio_state.selected_input_output_index,
                     input_from_output: audio_state.input_from_output,
                     selected_output_index: audio_state.selected_output_index,
-                    default_input_index: audio_state.default_input_index,
-                    default_output_index: audio_state.default_output_index,
                     show_input_dropdown: false,
                     show_output_dropdown: false,
-                    chat_messages: vec![ChatMessage {
-                        role: ChatRole::System,
-                        title: "System".into(),
-                        body: format!(
-                            "Ready. Configure env vars (HOST_WS_URL/HOST_TOKEN/...) then click Connect. Input devices: {}, output devices: {}",
-                            input_device_count,
-                            output_device_count
-                        )
-                        .into(),
-                    }],
+                    show_settings_panel: false,
+                    speaker_output_enabled: true,
+                    chat_messages: seed_mock_chat_messages(),
                 })
             },
         )
@@ -1474,8 +2231,6 @@ struct AudioDeviceState {
     selected_input_output_index: Option<usize>,
     input_from_output: bool,
     selected_output_index: Option<usize>,
-    default_input_index: Option<usize>,
-    default_output_index: Option<usize>,
 }
 
 fn load_audio_device_state() -> AudioDeviceState {
@@ -1521,8 +2276,6 @@ fn load_audio_device_state() -> AudioDeviceState {
         selected_input_output_index,
         input_from_output,
         selected_output_index,
-        default_input_index,
-        default_output_index,
     }
 }
 
@@ -1719,20 +2472,6 @@ fn env_optional(key: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-}
-
-fn cycle_index(current: Option<usize>, len: usize, forward: bool) -> usize {
-    if len == 0 {
-        return 0;
-    }
-
-    match (current, forward) {
-        (Some(index), true) => (index + 1) % len,
-        (Some(0), false) => len - 1,
-        (Some(index), false) => index - 1,
-        (None, true) => 0,
-        (None, false) => len - 1,
-    }
 }
 
 fn spawn_gateway_worker(
@@ -2031,41 +2770,6 @@ async fn handle_gateway_command(
             );
             false
         }
-        GatewayCommand::ListenStart => {
-            if let Err(error) = client.send_listen_start().await {
-                let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                    "Failed to send listen start: {error}"
-                )));
-                return false;
-            }
-
-            let _ = event_tx.send(UiGatewayEvent::OutgoingText {
-                kind: "listen".to_string(),
-                payload: to_pretty_json(&ClientTextMessage::listen_start()),
-            });
-            true
-        }
-        GatewayCommand::ListenStop => {
-            stop_uplink_capture(
-                uplink_streaming,
-                microphone_capture,
-                microphone_frame_rx,
-                event_tx,
-            );
-
-            if let Err(error) = client.send_listen_stop().await {
-                let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                    "Failed to send listen stop: {error}"
-                )));
-                return false;
-            }
-
-            let _ = event_tx.send(UiGatewayEvent::OutgoingText {
-                kind: "listen".to_string(),
-                payload: to_pretty_json(&ClientTextMessage::listen_stop()),
-            });
-            true
-        }
         GatewayCommand::DetectText(text) => {
             if let Err(error) = client.send_listen_detect_text(text.clone()).await {
                 let _ = event_tx.send(UiGatewayEvent::Error(format!(
@@ -2078,28 +2782,6 @@ async fn handle_gateway_command(
                 kind: "listen".to_string(),
                 payload: to_pretty_json(&ClientTextMessage::listen_detect_text(text)),
             });
-            true
-        }
-        GatewayCommand::SendSilenceFrame => {
-            let packet = match encode_single_silent_opus_frame() {
-                Ok(packet) => packet,
-                Err(error) => {
-                    let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                        "Failed to encode silent Opus frame: {error}"
-                    )));
-                    return true;
-                }
-            };
-
-            let packet_bytes = packet.len();
-            if let Err(error) = client.send_audio_frame(packet).await {
-                let _ = event_tx.send(UiGatewayEvent::Error(format!(
-                    "Failed to send binary audio frame: {error}"
-                )));
-                return false;
-            }
-
-            let _ = event_tx.send(UiGatewayEvent::UplinkAudioFrameSent(packet_bytes));
             true
         }
         GatewayCommand::StartUplinkStream => {
@@ -2678,11 +3360,6 @@ fn start_microphone_capture(
     Ok((MicrophoneCapture::new(stream, description), frame_rx))
 }
 
-fn encode_single_silent_opus_frame() -> Result<Vec<u8>, String> {
-    let mut encoder = OpusPacketEncoder::new()?;
-    encoder.encode_pcm16(&vec![0_i16; AUDIO_FRAME_SAMPLES])
-}
-
 fn float_to_pcm16(sample: f32) -> i16 {
     let clamped = sample.clamp(-1.0, 1.0);
     (clamped * i16::MAX as f32).round() as i16
@@ -2809,15 +3486,6 @@ fn read_string_field<'a>(payload: &'a Map<String, Value>, key: &str) -> Option<&
 
 fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| format!("{value:?}"))
-}
-
-fn single_visible_char(input: &str) -> Option<char> {
-    let mut chars = input.chars();
-    let ch = chars.next()?;
-    if chars.next().is_some() || ch.is_control() {
-        return None;
-    }
-    Some(ch)
 }
 
 fn to_pretty_json<T: serde::Serialize>(value: &T) -> String {
