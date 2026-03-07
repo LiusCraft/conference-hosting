@@ -50,12 +50,15 @@ impl WsGatewayConfig {
     }
 
     fn hello_message(&self) -> ClientTextMessage {
-        ClientTextMessage::hello(HelloMessage::new(
-            self.device_id.clone(),
-            self.device_name.clone(),
-            self.device_mac.clone(),
-            self.token.clone(),
-        ))
+        ClientTextMessage::hello(
+            HelloMessage::new(
+                self.device_id.clone(),
+                self.device_name.clone(),
+                self.device_mac.clone(),
+                self.token.clone(),
+            )
+            .with_intent_trace_notify(true),
+        )
     }
 
     fn websocket_url(&self) -> Result<Url, WsGatewayError> {
@@ -321,6 +324,7 @@ mod tests {
             assert_eq!(hello["type"], "hello");
             assert_eq!(hello["device_id"], "dev-001");
             assert_eq!(hello["device_mac"], "AA:BB:CC:DD:EE:FF");
+            assert_eq!(hello["features"]["notify"]["intent_trace"], true);
 
             socket
                 .send(Message::Text(

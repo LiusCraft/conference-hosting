@@ -40,6 +40,19 @@ pub struct HelloMessage {
     pub device_name: String,
     pub device_mac: String,
     pub token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub features: Option<HelloFeatures>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HelloFeatures {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<HelloNotifyFeatures>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HelloNotifyFeatures {
+    pub intent_trace: bool,
 }
 
 impl HelloMessage {
@@ -54,7 +67,17 @@ impl HelloMessage {
             device_name: device_name.into(),
             device_mac: device_mac.into(),
             token: token.into(),
+            features: None,
         }
+    }
+
+    pub fn with_intent_trace_notify(mut self, enabled: bool) -> Self {
+        self.features = Some(HelloFeatures {
+            notify: Some(HelloNotifyFeatures {
+                intent_trace: enabled,
+            }),
+        });
+        self
     }
 }
 
@@ -148,6 +171,24 @@ mod tests {
         assert_eq!(value["device_name"], "host-desktop");
         assert_eq!(value["device_mac"], "AA:BB:CC:DD:EE:FF");
         assert_eq!(value["token"], "token-demo");
+        assert!(value.get("features").is_none());
+    }
+
+    #[test]
+    fn hello_message_supports_intent_trace_notify_feature() {
+        let message = ClientTextMessage::hello(
+            HelloMessage::new(
+                "device-001",
+                "host-desktop",
+                "AA:BB:CC:DD:EE:FF",
+                "token-demo",
+            )
+            .with_intent_trace_notify(true),
+        );
+        let value = serde_json::to_value(message).expect("serialize hello with features");
+
+        assert_eq!(value["type"], "hello");
+        assert_eq!(value["features"]["notify"]["intent_trace"], true);
     }
 
     #[test]
