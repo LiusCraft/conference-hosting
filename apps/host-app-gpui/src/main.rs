@@ -19,9 +19,10 @@ use gateway_runtime::{
     load_audio_device_state, spawn_gateway_worker, COMMAND_CHANNEL_CAPACITY, EVENT_CHANNEL_CAPACITY,
 };
 use gpui::{
-    canvas, div, prelude::*, px, rgb, size, App, Application, Bounds, Context, ElementInputHandler,
-    EntityInputHandler, FocusHandle, FontWeight, KeyDownEvent, ScrollHandle, SharedString,
-    UTF16Selection, Window, WindowBounds, WindowOptions,
+    canvas, div, point, prelude::*, px, rgb, size, App, Application, Bounds, ClickEvent, Context,
+    ElementInputHandler, EntityInputHandler, FocusHandle, FontWeight, KeyDownEvent, ScrollHandle,
+    SharedString, TitlebarOptions, UTF16Selection, Window, WindowBounds, WindowControlArea,
+    WindowOptions,
 };
 use host_core::{GatewayStatus, InboundTextMessage, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE_HZ};
 use host_platform::WsGatewayConfig;
@@ -32,6 +33,7 @@ mod gateway_runtime;
 
 const WINDOW_WIDTH: f32 = 1200.0;
 const WINDOW_HEIGHT: f32 = 760.0;
+const APP_TITLE: &str = "AI Meeting Host v0.1.0-alpha";
 const MAX_CHAT_MESSAGES: usize = 240;
 const DEFAULT_WS_URL: &str = "wss://xrobo-io.qiniuapi.com/v1/ws/";
 const DEFAULT_DEVICE_MAC: &str = "unknown-device";
@@ -1430,6 +1432,34 @@ impl Render for MeetingHostShell {
             0x145a58
         };
 
+        let custom_titlebar = cfg!(target_os = "macos").then(|| {
+            div()
+                .id("custom-titlebar")
+                .h_8()
+                .px_4()
+                .bg(rgb(0x070f1b))
+                .border_b_1()
+                .border_color(rgb(0x182132))
+                .flex()
+                .items_center()
+                .window_control_area(WindowControlArea::Drag)
+                .on_click(cx.listener(|_view, event: &ClickEvent, window, _cx| {
+                    if event.standard_click() && event.click_count() >= 2 {
+                        window.titlebar_double_click();
+                    }
+                }))
+                .child(div().w_16())
+                .child(
+                    div()
+                        .flex_1()
+                        .text_center()
+                        .text_base()
+                        .text_color(rgb(0x7f8ba1))
+                        .child(APP_TITLE),
+                )
+                .child(div().w_16())
+        });
+
         let connect_button = match self.connection_state {
             ConnectionState::Idle => hero_action_button(
                 ui_icon(IconName::Wifi, 14.0, 0x95f8ef),
@@ -1808,9 +1838,16 @@ impl Render for MeetingHostShell {
                     .border_color(rgb(0x1a2232))
                     .child(
                         div()
+                            .id("sidebar-drag-strip")
                             .flex()
                             .items_center()
                             .justify_between()
+                            .window_control_area(WindowControlArea::Drag)
+                            .on_click(cx.listener(|_view, event: &ClickEvent, window, _cx| {
+                                if event.standard_click() && event.click_count() >= 2 {
+                                    window.titlebar_double_click();
+                                }
+                            }))
                             .child(
                                 div()
                                     .flex()
@@ -2084,6 +2121,7 @@ impl Render for MeetingHostShell {
             .bg(rgb(0x040913))
             .child(
                 div()
+                    .id("chat-panel-drag-strip")
                     .h_10()
                     .px_4()
                     .border_b_1()
@@ -2092,6 +2130,12 @@ impl Render for MeetingHostShell {
                     .flex()
                     .items_center()
                     .justify_between()
+                    .window_control_area(WindowControlArea::Drag)
+                    .on_click(cx.listener(|_view, event: &ClickEvent, window, _cx| {
+                        if event.standard_click() && event.click_count() >= 2 {
+                            window.titlebar_double_click();
+                        }
+                    }))
                     .child(
                         div()
                             .flex()
@@ -2212,6 +2256,7 @@ impl Render for MeetingHostShell {
             .flex()
             .flex_col()
             .min_h_0()
+            .children(custom_titlebar)
             .child(
                 div()
                     .flex()
@@ -2738,6 +2783,15 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT))),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(APP_TITLE.into()),
+                        appears_transparent: cfg!(target_os = "macos"),
+                        traffic_light_position: if cfg!(target_os = "macos") {
+                            Some(point(px(14.0), px(9.0)))
+                        } else {
+                            None
+                        },
+                    }),
                     ..Default::default()
                 },
                 |_window, cx| {
