@@ -39,6 +39,7 @@ const DEFAULT_CLIENT_ID: &str = "resvpu932";
 const DEFAULT_TOKEN: &str = "your-token1";
 const HOST_INPUT_DEVICE_ENV: &str = "HOST_INPUT_DEVICE";
 const HOST_OUTPUT_DEVICE_ENV: &str = "HOST_OUTPUT_DEVICE";
+const CHAT_BOTTOM_EPSILON_PX: f32 = 2.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectionState {
@@ -137,6 +138,8 @@ struct MeetingHostShell {
     show_settings_panel: bool,
     speaker_output_enabled: bool,
     chat_messages: Vec<ChatMessage>,
+    follow_latest_chat_messages: bool,
+    pending_chat_messages: usize,
 }
 
 impl MeetingHostShell {
@@ -629,12 +632,37 @@ impl MeetingHostShell {
         self.push_chat(role, title, body);
     }
 
+    fn is_chat_scrolled_to_bottom(&self) -> bool {
+        let max_offset = self.chat_scroll.max_offset().height;
+        let current_offset = self.chat_scroll.offset().y;
+        let distance_to_bottom = (current_offset + max_offset).abs();
+        distance_to_bottom <= px(CHAT_BOTTOM_EPSILON_PX)
+    }
+
+    fn sync_chat_follow_state(&mut self) {
+        if self.is_chat_scrolled_to_bottom() {
+            self.follow_latest_chat_messages = true;
+            self.pending_chat_messages = 0;
+        } else if self.chat_scroll.max_offset().height > px(0.0) {
+            self.follow_latest_chat_messages = false;
+        }
+    }
+
+    fn jump_to_latest_chat_messages(&mut self, cx: &mut Context<Self>) {
+        self.follow_latest_chat_messages = true;
+        self.pending_chat_messages = 0;
+        self.chat_scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
     fn push_chat(
         &mut self,
         role: ChatRole,
         title: impl Into<SharedString>,
         body: impl Into<SharedString>,
     ) {
+        self.sync_chat_follow_state();
+
         self.chat_messages.insert(
             0,
             ChatMessage {
@@ -646,6 +674,13 @@ impl MeetingHostShell {
 
         if self.chat_messages.len() > MAX_CHAT_MESSAGES {
             self.chat_messages.truncate(MAX_CHAT_MESSAGES);
+        }
+
+        if self.follow_latest_chat_messages {
+            self.pending_chat_messages = 0;
+            self.chat_scroll.scroll_to_bottom();
+        } else {
+            self.pending_chat_messages = self.pending_chat_messages.saturating_add(1);
         }
     }
 
@@ -823,6 +858,8 @@ impl MeetingHostShell {
 
 impl Render for MeetingHostShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_chat_follow_state();
+
         let is_connected = matches!(self.connection_state, ConnectionState::Connected);
         let can_send_text = is_connected && !self.text_draft.trim().is_empty();
         let is_text_input_focused = self.text_input_focus.is_focused(window);
@@ -1504,6 +1541,61 @@ impl Render for MeetingHostShell {
             );
         }
 
+        let mut message_stream_panel = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(message_stream);
+
+        if self.pending_chat_messages > 0 && !self.follow_latest_chat_messages {
+            let pending_chat_label = if self.pending_chat_messages > 99 {
+                "99+ 条新消息".to_string()
+            } else {
+                format!("{} 条新消息", self.pending_chat_messages)
+            };
+
+            message_stream_panel = message_stream_panel.child(
+                div()
+                    .id("jump-to-latest-chat")
+                    .absolute()
+                    .right_5()
+                    .bottom_4()
+                    .h_11()
+                    .px_4()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(rgb(0x31425d))
+                    .bg(rgb(0x111d30))
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0xc6d4e7))
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .size_5()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgb(0x3b4e6d))
+                            .bg(rgb(0x1a2a42))
+                            .text_xs()
+                            .text_color(rgb(0x8fa8ca))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child("v"),
+                    )
+                    .child(pending_chat_label)
+                    .on_click(cx.listener(|view, _event, _window, cx| {
+                        view.jump_to_latest_chat_messages(cx)
+                    })),
+            );
+        }
+
         let chat_panel = div()
             .flex_1()
             .h_full()
@@ -1561,7 +1653,7 @@ impl Render for MeetingHostShell {
                         None
                     }),
             )
-            .child(message_stream)
+            .child(message_stream_panel)
             .child(
                 div()
                     .h_16()
@@ -2192,6 +2284,8 @@ fn main() {
                     show_settings_panel: false,
                     speaker_output_enabled: true,
                     chat_messages: seed_mock_chat_messages(),
+                    follow_latest_chat_messages: true,
+                    pending_chat_messages: 0,
                 })
             },
         )
