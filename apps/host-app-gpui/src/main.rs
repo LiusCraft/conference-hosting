@@ -19,10 +19,10 @@ use gateway_runtime::{
     load_audio_device_state, spawn_gateway_worker, COMMAND_CHANNEL_CAPACITY, EVENT_CHANNEL_CAPACITY,
 };
 use gpui::{
-    canvas, div, point, prelude::*, px, rgb, size, App, Application, Bounds, ClickEvent, Context,
-    ElementInputHandler, EntityInputHandler, FocusHandle, FontWeight, KeyDownEvent, ScrollHandle,
-    SharedString, TitlebarOptions, UTF16Selection, Window, WindowBounds, WindowControlArea,
-    WindowOptions,
+    actions, canvas, div, point, prelude::*, px, rgb, size, App, Application, Bounds,
+    ClickEvent, Context, ElementInputHandler, EntityInputHandler, FocusHandle, FontWeight,
+    KeyBinding, KeyDownEvent, ScrollHandle, SharedString, TitlebarOptions, UTF16Selection,
+    Window, WindowBounds, WindowControlArea, WindowOptions,
 };
 use host_core::{GatewayStatus, InboundTextMessage, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE_HZ};
 use host_platform::WsGatewayConfig;
@@ -42,6 +42,8 @@ const DEFAULT_CLIENT_ID: &str = "resvpu932";
 const DEFAULT_TOKEN: &str = "your-token1";
 const CHAT_BOTTOM_EPSILON_PX: f32 = 2.0;
 const TTS_APPEND_REUSE_WINDOW_MS: u64 = 5_000;
+
+actions!(host_app, [CloseWindow, QuitApp]);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectionState {
@@ -156,6 +158,26 @@ struct MeetingHostShell {
 }
 
 impl MeetingHostShell {
+    fn prepare_for_window_close(&mut self) {
+        self.show_input_dropdown = false;
+        self.show_output_dropdown = false;
+        self.show_settings_panel = false;
+
+        if !matches!(self.connection_state, ConnectionState::Connected) {
+            return;
+        }
+
+        if let Some(command_tx) = self.ws_command_tx.as_ref() {
+            let _ = command_tx.try_send(GatewayCommand::Disconnect);
+        }
+
+        self.connection_state = ConnectionState::Disconnecting;
+        self.uplink_streaming = false;
+        self.pending_detect_requests.clear();
+        self.active_tts_message_index = None;
+        self.active_intent_trace_message_index = None;
+    }
+
     fn connect_gateway(&mut self, cx: &mut Context<Self>) {
         if !matches!(self.connection_state, ConnectionState::Idle) {
             return;
@@ -2777,6 +2799,50 @@ fn main() {
     Application::new()
         .with_assets(AppAssets::new())
         .run(|cx: &mut App| {
+            cx.bind_keys([
+                KeyBinding::new("cmd-w", CloseWindow, None),
+                KeyBinding::new("ctrl-w", CloseWindow, None),
+                KeyBinding::new("cmd-q", QuitApp, None),
+                KeyBinding::new("ctrl-q", QuitApp, None),
+            ]);
+            cx.intercept_keystrokes(|event, window, cx| {
+                let keystroke = &event.keystroke;
+                let close_modifier_pressed = (cfg!(target_os = "macos")
+                    && keystroke.modifiers.platform)
+                    || (!cfg!(target_os = "macos") && keystroke.modifiers.control);
+                let should_close = keystroke.key == "w" && close_modifier_pressed;
+                let should_quit = keystroke.key == "q" && close_modifier_pressed;
+
+                if should_close {
+                    cx.stop_propagation();
+                    window.remove_window();
+                    return;
+                }
+
+                if should_quit {
+                    cx.stop_propagation();
+                    cx.quit();
+                }
+            })
+            .detach();
+            cx.on_action(|_: &CloseWindow, cx| {
+                if let Some(window) = cx.active_window() {
+                    let _ = window.update(cx, |_, window, _| {
+                        window.remove_window();
+                    });
+                }
+            });
+            cx.on_action(|_: &QuitApp, cx| {
+                cx.quit();
+            });
+
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+
             let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
 
             cx.open_window(
@@ -2796,7 +2862,7 @@ fn main() {
                 },
                 |_window, cx| {
                     let audio_state = load_audio_device_state();
-                    cx.new(move |cx| MeetingHostShell {
+                    let shell = cx.new(move |cx| MeetingHostShell {
                         connection_state: ConnectionState::Idle,
                         gateway_status: GatewayStatus::Idle,
                         ws_url: DEFAULT_WS_URL.into(),
@@ -2831,7 +2897,17 @@ fn main() {
                         active_intent_trace_message_index: None,
                         follow_latest_chat_messages: true,
                         pending_chat_messages: 0,
-                    })
+                    });
+
+                    let shell_for_close = shell.downgrade();
+                    _window.on_window_should_close(cx, move |_window, cx| {
+                        let _ = shell_for_close.update(cx, |view, _cx| {
+                            view.prepare_for_window_close();
+                        });
+                        true
+                    });
+
+                    shell
                 },
             )
             .expect("open GPUI window failed");
