@@ -9,6 +9,7 @@ build = "build.rs"
 [dependencies]
 cpal.workspace = true
 gpui.workspace = true
+gpui-component.workspace = true
 host-core = { path = "../../crates/host-core" }
 host-platform = { path = "../../crates/host-platform" }
 opus.workspace = true

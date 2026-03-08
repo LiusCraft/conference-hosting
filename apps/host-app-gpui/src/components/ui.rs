@@ -1,8 +1,6 @@
-use std::time::Duration;
-
 use gpui::{
-    deferred, div, prelude::*, px, rgb, rgba, Animation, AnimationExt as _, Div, FontWeight,
-    ScrollHandle, SharedString, Stateful, Svg,
+    deferred, div, prelude::*, px, rgb, rgba, Div, FontWeight, ScrollHandle, SharedString,
+    Stateful, Svg,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,7 +116,7 @@ pub fn floating_badge_button(
         .child(label.into())
 }
 
-pub fn text_input_shell(border_hex: u32) -> Div {
+pub fn text_input_shell(border_hex: u32, content: impl IntoElement) -> Div {
     div()
         .flex_1()
         .h_11()
@@ -131,55 +129,7 @@ pub fn text_input_shell(border_hex: u32) -> Div {
         .flex()
         .items_center()
         .justify_between()
-}
-
-pub fn text_input_content_row() -> Div {
-    div()
-        .min_w_0()
-        .flex_1()
-        .relative()
-        .flex()
-        .items_center()
-        .gap_0p5()
-}
-
-pub fn text_input_value(text: impl Into<SharedString>, is_placeholder: bool) -> Div {
-    div()
-        .text_lg()
-        .text_color(if is_placeholder {
-            rgb(0x57657d)
-        } else {
-            rgb(0xd8dfef)
-        })
-        .text_ellipsis()
-        .child(text.into())
-}
-
-pub fn text_input_caret(
-    is_focused: bool,
-    animation_key: &'static str,
-    color_hex: u32,
-    element_id: &'static str,
-) -> impl IntoElement {
-    div()
-        .id(element_id)
-        .w(px(2.0))
-        .h(px(18.0))
-        .rounded_sm()
-        .bg(rgb(color_hex))
-        .with_animation(
-            animation_key,
-            Animation::new(Duration::from_millis(980)).repeat(),
-            move |this, delta| {
-                if !is_focused {
-                    this.opacity(0.0)
-                } else if delta < 0.52 {
-                    this.opacity(1.0)
-                } else {
-                    this.opacity(0.0)
-                }
-            },
-        )
+        .child(content)
 }
 
 pub fn message_list(scroll: &ScrollHandle) -> Stateful<Div> {
@@ -219,6 +169,7 @@ pub fn dropdown_overlay_panel(content: impl IntoElement) -> impl IntoElement {
             .border_1()
             .border_color(rgb(0x243145))
             .bg(rgb(0x0d1422))
+            .occlude()
             .overflow_hidden()
             .child(content),
     )
@@ -294,7 +245,7 @@ pub fn modal_surface(width_px: f32, max_height_px: f32) -> Div {
 }
 
 pub fn modal_overlay_root() -> Div {
-    div().absolute().top_0().left_0().size_full()
+    div().absolute().top_0().left_0().size_full().occlude()
 }
 
 pub fn modal_backdrop(backdrop_hex_with_alpha: u32) -> Div {

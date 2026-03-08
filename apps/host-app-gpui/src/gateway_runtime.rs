@@ -16,7 +16,7 @@ use tokio::runtime::Builder as TokioRuntimeBuilder;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 
-use crate::{AudioRoutingConfig, GatewayCommand, UiGatewayEvent};
+use crate::app::state::{AudioRoutingConfig, GatewayCommand, UiGatewayEvent};
 
 pub const COMMAND_CHANNEL_CAPACITY: usize = 64;
 pub const EVENT_CHANNEL_CAPACITY: usize = 512;
