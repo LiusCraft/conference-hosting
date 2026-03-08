@@ -1,3 +1,6 @@
 /target
 .DS_Store
 .opencode/
+apps/host-app-gpui/dist/
+apps/host-app-gpui/assets/icons/*.png
+apps/host-app-gpui/assets/icons/*.iconset/

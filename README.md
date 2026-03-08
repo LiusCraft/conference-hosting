@@ -15,6 +15,28 @@ cargo fetch
 cargo run -p host-app-gpui
 ```
 
+## 应用图标与打包
+
+- 图标源文件：`apps/host-app-gpui/assets/svg/app-taskbar-logo.svg`
+- 已生成图标：`apps/host-app-gpui/assets/icons/app-taskbar-logo.icns`、`apps/host-app-gpui/assets/icons/app-taskbar-logo.ico`
+
+重新导出图标（SVG -> PNG/ICO/ICNS）：
+
+```bash
+bash apps/host-app-gpui/scripts/build_app_icons.sh
+```
+
+生成 macOS `.app` 包（Dock 显示自定义图标）：
+
+```bash
+bash apps/host-app-gpui/scripts/package_macos_app.sh
+```
+
+输出路径：`apps/host-app-gpui/dist/AI Meeting Host.app`
+
+Windows 下执行 `cargo build -p host-app-gpui --release` 时，会通过 `build.rs`
+自动把 `assets/icons/app-taskbar-logo.ico` 嵌入到 exe 资源中，用于任务栏图标。
+
 可选环境变量（用于 GPUI 联调连接参数覆盖）：
 
 - `HOST_WS_URL`（默认值见 `apps/host-app-gpui/src/main.rs` 的 `DEFAULT_WS_URL`）

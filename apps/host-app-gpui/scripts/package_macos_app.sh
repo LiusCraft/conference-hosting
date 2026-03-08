@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  printf 'This script only supports macOS.\n' >&2
+  exit 1
+fi
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+APP_DIR="$ROOT_DIR/apps/host-app-gpui"
+DIST_DIR="$APP_DIR/dist"
+BUNDLE_DIR="$DIST_DIR/AI Meeting Host.app"
+CONTENTS_DIR="$BUNDLE_DIR/Contents"
+MACOS_DIR="$CONTENTS_DIR/MacOS"
+RESOURCES_DIR="$CONTENTS_DIR/Resources"
+
+BINARY_PATH="$ROOT_DIR/target/release/host-app-gpui"
+ICON_PATH="$APP_DIR/assets/icons/app-taskbar-logo.icns"
+
+if [[ ! -f "$ICON_PATH" ]]; then
+  printf 'Missing icon file: %s\n' "$ICON_PATH" >&2
+  exit 1
+fi
+
+cargo build -p host-app-gpui --release --manifest-path "$ROOT_DIR/Cargo.toml"
+
+rm -rf "$BUNDLE_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+
+cp "$BINARY_PATH" "$MACOS_DIR/host-app-gpui"
+chmod +x "$MACOS_DIR/host-app-gpui"
+cp "$ICON_PATH" "$RESOURCES_DIR/app-taskbar-logo.icns"
+
+cat > "$CONTENTS_DIR/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>AI Meeting Host</string>
+  <key>CFBundleExecutable</key>
+  <string>host-app-gpui</string>
+  <key>CFBundleIconFile</key>
+  <string>app-taskbar-logo.icns</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.liuscraft.ai-meeting-host</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>AI Meeting Host</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>0.1.0</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>12.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+</dict>
+</plist>
+EOF
+
+printf 'Created app bundle: %s\n' "$BUNDLE_DIR"
