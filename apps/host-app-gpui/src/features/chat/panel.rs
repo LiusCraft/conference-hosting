@@ -4,13 +4,18 @@ use gpui_component::input::Input;
 use gpui_component::Disableable;
 
 use crate::app::shell::{ui_button_icon, ButtonIconTone, MeetingHostShell};
-use crate::app::state::ConnectionState;
+use crate::app::state::{ChatRole, ConnectionState};
 use crate::components::icon::IconName;
 
 impl MeetingHostShell {
     pub(crate) fn render_chat_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let is_connected = matches!(self.connection_state, ConnectionState::Connected);
-        let chat_title = format!("{} 条消息", self.chat_messages.len());
+        let ai_reply_count = self
+            .chat_messages
+            .iter()
+            .filter(|message| message.role == ChatRole::Assistant)
+            .count();
+        let chat_title = format!("{} 条消息", ai_reply_count);
 
         div()
             .flex_1()
@@ -138,11 +143,13 @@ impl MeetingHostShell {
             .min_h_0()
             .child(message_stream);
 
-        if self.pending_chat_messages > 0 && !self.follow_latest_chat_messages {
+        if self.has_pending_chat_messages && !self.follow_latest_chat_messages {
             let pending_chat_label = if self.pending_chat_messages > 99 {
                 "99+ 条新消息".to_string()
-            } else {
+            } else if self.pending_chat_messages > 0 {
                 format!("{} 条新消息", self.pending_chat_messages)
+            } else {
+                "有新消息".to_string()
             };
             let view = cx.entity().downgrade();
 

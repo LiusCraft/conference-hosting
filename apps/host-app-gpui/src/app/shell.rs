@@ -86,6 +86,7 @@ pub(crate) struct MeetingHostShell {
     pub(crate) active_intent_trace_message_index: Option<usize>,
     pub(crate) follow_latest_chat_messages: bool,
     pub(crate) pending_chat_messages: usize,
+    pub(crate) has_pending_chat_messages: bool,
     pub(crate) last_audio_event_ui_refresh_at: Option<Instant>,
 }
 
@@ -267,6 +268,7 @@ impl MeetingHostShell {
             active_intent_trace_message_index: None,
             follow_latest_chat_messages: true,
             pending_chat_messages: 0,
+            has_pending_chat_messages: false,
             last_audio_event_ui_refresh_at: None,
         }
     }

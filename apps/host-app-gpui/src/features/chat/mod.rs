@@ -316,6 +316,7 @@ impl MeetingHostShell {
         if self.is_chat_scrolled_to_bottom() {
             self.follow_latest_chat_messages = true;
             self.pending_chat_messages = 0;
+            self.has_pending_chat_messages = false;
         } else if self.chat_scroll.max_offset().height > px(0.0) {
             self.follow_latest_chat_messages = false;
         }
@@ -324,6 +325,7 @@ impl MeetingHostShell {
     pub(crate) fn jump_to_latest_chat_messages(&mut self, cx: &mut Context<Self>) {
         self.follow_latest_chat_messages = true;
         self.pending_chat_messages = 0;
+        self.has_pending_chat_messages = false;
         self.chat_scroll.scroll_to_bottom();
         self.notify_views(cx);
     }
@@ -412,9 +414,13 @@ impl MeetingHostShell {
 
         if self.follow_latest_chat_messages {
             self.pending_chat_messages = 0;
+            self.has_pending_chat_messages = false;
             self.chat_scroll.scroll_to_bottom();
         } else {
-            self.pending_chat_messages = self.pending_chat_messages.saturating_add(1);
+            self.has_pending_chat_messages = true;
+            if role == ChatRole::Assistant {
+                self.pending_chat_messages = self.pending_chat_messages.saturating_add(1);
+            }
         }
     }
 }
