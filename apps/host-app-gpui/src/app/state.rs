@@ -50,6 +50,18 @@ pub(crate) enum GatewayCommand {
     StartUplinkStream,
     StopUplinkStream,
     SetSpeakerOutputEnabled(bool),
+    SetAecEnabled(bool),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AecStatsSnapshot {
+    pub(crate) stream_delay_ms: u32,
+    pub(crate) capture_callback_delay_ms: u32,
+    pub(crate) playback_callback_delay_ms: u32,
+    pub(crate) playback_buffer_delay_ms: u32,
+    pub(crate) processor_delay_ms: i32,
+    pub(crate) erl_db: f32,
+    pub(crate) erle_db: f32,
 }
 
 #[derive(Debug)]
@@ -63,6 +75,9 @@ pub(crate) enum UiGatewayEvent {
     UplinkAudioFrameSent(usize),
     UplinkStreamStateChanged(bool),
     DownlinkAudioFrameReceived(usize),
+    NetworkRttUpdated(u32),
+    AecStateChanged(bool),
+    AecStats(AecStatsSnapshot),
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +86,7 @@ pub(crate) struct AudioRoutingConfig {
     pub(crate) input_from_output: bool,
     pub(crate) output_device_name: Option<String>,
     pub(crate) speaker_output_enabled: bool,
+    pub(crate) aec_enabled: bool,
 }
 
 impl AudioRoutingConfig {

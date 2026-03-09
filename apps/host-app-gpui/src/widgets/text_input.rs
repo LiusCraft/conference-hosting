@@ -83,8 +83,101 @@ impl MeetingHostShell {
         }
     }
 
+    pub(crate) fn handle_auth_token_input_event(
+        &mut self,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                self.sync_auth_token_from_input(cx);
+                self.notify_views(cx);
+            }
+            InputEvent::PressEnter { .. } => {
+                self.sync_auth_token_from_input(cx);
+                window.blur();
+            }
+            InputEvent::Focus => {
+                self.auth_token_input_focused = true;
+                self.notify_views(cx);
+            }
+            InputEvent::Blur => {
+                self.auth_token_input_focused = false;
+                self.sync_auth_token_from_input(cx);
+                self.notify_views(cx);
+            }
+        }
+    }
+
+    pub(crate) fn handle_device_id_input_event(
+        &mut self,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                self.sync_device_id_from_input(cx);
+                self.notify_views(cx);
+            }
+            InputEvent::PressEnter { .. } => {
+                self.sync_device_id_from_input(cx);
+                window.blur();
+            }
+            InputEvent::Focus => {
+                self.device_id_input_focused = true;
+                self.notify_views(cx);
+            }
+            InputEvent::Blur => {
+                self.device_id_input_focused = false;
+                self.sync_device_id_from_input(cx);
+                self.notify_views(cx);
+            }
+        }
+    }
+
+    pub(crate) fn handle_client_id_input_event(
+        &mut self,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                self.sync_client_id_from_input(cx);
+                self.notify_views(cx);
+            }
+            InputEvent::PressEnter { .. } => {
+                self.sync_client_id_from_input(cx);
+                window.blur();
+            }
+            InputEvent::Focus => {
+                self.client_id_input_focused = true;
+                self.notify_views(cx);
+            }
+            InputEvent::Blur => {
+                self.client_id_input_focused = false;
+                self.sync_client_id_from_input(cx);
+                self.notify_views(cx);
+            }
+        }
+    }
+
     pub(crate) fn sync_ws_url_from_input(&mut self, cx: &mut Context<Self>) {
-        self.ws_url = self.ws_url_input_state.read(cx).value().to_string();
+        self.ws_url_draft = self.ws_url_input_state.read(cx).value().to_string();
+    }
+
+    pub(crate) fn sync_auth_token_from_input(&mut self, cx: &mut Context<Self>) {
+        self.auth_token_draft = self.auth_token_input_state.read(cx).value().to_string();
+    }
+
+    pub(crate) fn sync_device_id_from_input(&mut self, cx: &mut Context<Self>) {
+        self.device_id_draft = self.device_id_input_state.read(cx).value().to_string();
+    }
+
+    pub(crate) fn sync_client_id_from_input(&mut self, cx: &mut Context<Self>) {
+        self.client_id_draft = self.client_id_input_state.read(cx).value().to_string();
     }
 
     pub(crate) fn chat_input_has_text(&self, cx: &mut Context<Self>) -> bool {

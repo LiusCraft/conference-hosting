@@ -310,7 +310,7 @@ Virtual Microphone
 
 - 先实现主链路：采集 -> 20ms 分帧 -> WebSocket 双向流 -> TTS 播放到虚拟麦克风
 - 首批优先支持 macOS + Windows，Linux 在第二阶段补齐
-- AEC 先采用策略性降噪/暂停采集，完整 AEC 在第二阶段引入
+- AEC 先落地基础实时方案（AEC3，16kHz/mono，10ms 分块），后续再补齐更细粒度延迟估计与自动调参
 
 ## 协议实现备注
 
@@ -332,3 +332,5 @@ Virtual Microphone
 - 已在 `host-app-gpui` 支持将所选输入源与输出源音频镜像到系统默认扬声器，便于本机监听
 - `host-app-gpui` 对下行音频二进制仅做统计，不转文本展示
 - 当前虚拟麦克风输出仍为下一阶段
+- 已在 `host-app-gpui` 接入 AEC3 实时回声消除：下行 Opus 解码样本作为 render 参考，麦克风上行在 10ms 帧上做 capture 消除，并基于采集/播放回调延迟动态更新 stream delay（可用 `HOST_ENABLE_AEC=0` 关闭）
+- 设置面板新增 AEC 开关与实时指标展示（应用流延迟、采集/播放回调延迟、播放缓冲延迟、ERL/ERLE）

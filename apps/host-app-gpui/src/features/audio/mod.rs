@@ -1,11 +1,164 @@
 pub mod view;
 
-use gpui::{prelude::*, Context};
+use gpui::{div, prelude::*, rgb, App, Context, SharedString, Window};
+use gpui_component::select::{SearchableVec, SelectEvent, SelectGroup, SelectItem, SelectState};
 
-use crate::app::shell::MeetingHostShell;
+use crate::app::shell::{ui_button_icon, ButtonIconTone, MeetingHostShell};
 use crate::app::state::{AudioRoutingConfig, ConnectionState, GatewayCommand};
 use crate::components::icon::IconName;
-use crate::components::ui::level_meter;
+
+pub(crate) type InputSelectState = SelectState<SearchableVec<SelectGroup<AudioInputSelectItem>>>;
+pub(crate) type OutputSelectState = SelectState<Vec<AudioOutputSelectItem>>;
+pub(crate) type InputSelectEvent = SelectEvent<SearchableVec<SelectGroup<AudioInputSelectItem>>>;
+pub(crate) type OutputSelectEvent = SelectEvent<Vec<AudioOutputSelectItem>>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum InputDeviceSelection {
+    Input(usize),
+    LoopbackOutput(usize),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AudioInputSelectItem {
+    value: InputDeviceSelection,
+    title: SharedString,
+    icon: IconName,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AudioOutputSelectItem {
+    value: usize,
+    title: SharedString,
+    icon: IconName,
+}
+
+impl AudioInputSelectItem {
+    fn microphone(index: usize, name: &str) -> Self {
+        Self {
+            value: InputDeviceSelection::Input(index),
+            title: SharedString::from(name.to_string()),
+            icon: audio_device_icon(name),
+        }
+    }
+
+    fn loopback_output(index: usize, name: &str) -> Self {
+        Self {
+            value: InputDeviceSelection::LoopbackOutput(index),
+            title: SharedString::from(format!("loopback: {name}")),
+            icon: IconName::Cable,
+        }
+    }
+}
+
+impl AudioOutputSelectItem {
+    fn new(index: usize, name: &str) -> Self {
+        Self {
+            value: index,
+            title: SharedString::from(name.to_string()),
+            icon: audio_device_icon(name),
+        }
+    }
+}
+
+impl SelectItem for AudioInputSelectItem {
+    type Value = InputDeviceSelection;
+
+    fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let icon_tone = match self.value {
+            InputDeviceSelection::Input(_) => ButtonIconTone::Neutral,
+            InputDeviceSelection::LoopbackOutput(_) => ButtonIconTone::Info,
+        };
+
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .min_w_0()
+            .child(ui_button_icon(self.icon, 12.0, icon_tone))
+            .child(div().text_ellipsis().child(self.title.clone()))
+    }
+}
+
+impl SelectItem for AudioOutputSelectItem {
+    type Value = usize;
+
+    fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+
+    fn render(&self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .min_w_0()
+            .child(ui_button_icon(self.icon, 12.0, ButtonIconTone::Neutral))
+            .child(div().text_ellipsis().child(self.title.clone()))
+    }
+}
+
+pub(crate) fn build_input_select_items(
+    input_devices: &[String],
+    output_devices: &[String],
+) -> SearchableVec<SelectGroup<AudioInputSelectItem>> {
+    let mut groups = Vec::new();
+
+    if !input_devices.is_empty() {
+        groups.push(
+            SelectGroup::new("输入设备").items(
+                input_devices
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| AudioInputSelectItem::microphone(index, name)),
+            ),
+        );
+    }
+
+    if !output_devices.is_empty() {
+        groups.push(
+            SelectGroup::new("输出回采 (loopback)").items(
+                output_devices
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| AudioInputSelectItem::loopback_output(index, name)),
+            ),
+        );
+    }
+
+    SearchableVec::new(groups)
+}
+
+pub(crate) fn build_output_select_items(output_devices: &[String]) -> Vec<AudioOutputSelectItem> {
+    output_devices
+        .iter()
+        .enumerate()
+        .map(|(index, name)| AudioOutputSelectItem::new(index, name))
+        .collect()
+}
+
+pub(crate) fn selected_input_selection(
+    input_from_output: bool,
+    selected_input_index: Option<usize>,
+    selected_input_output_index: Option<usize>,
+) -> Option<InputDeviceSelection> {
+    if input_from_output {
+        selected_input_output_index.map(InputDeviceSelection::LoopbackOutput)
+    } else {
+        selected_input_index.map(InputDeviceSelection::Input)
+    }
+}
 
 impl MeetingHostShell {
     pub(crate) fn build_audio_routing_config(&self) -> AudioRoutingConfig {
@@ -14,7 +167,39 @@ impl MeetingHostShell {
             input_from_output: self.input_from_output,
             output_device_name: self.selected_output_device_name().map(ToOwned::to_owned),
             speaker_output_enabled: self.speaker_output_enabled,
+            aec_enabled: self.aec_enabled,
         }
+    }
+
+    pub(crate) fn handle_input_select_event(
+        &mut self,
+        event: &InputSelectEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let SelectEvent::Confirm(selected) = event;
+        let Some(selected) = selected.as_ref() else {
+            return;
+        };
+
+        match selected {
+            InputDeviceSelection::Input(index) => self.select_input_device_index(*index, cx),
+            InputDeviceSelection::LoopbackOutput(index) => {
+                self.select_input_from_output_index(*index, cx)
+            }
+        }
+    }
+
+    pub(crate) fn handle_output_select_event(
+        &mut self,
+        event: &OutputSelectEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let SelectEvent::Confirm(selected) = event;
+        let Some(selected) = selected.as_ref() else {
+            return;
+        };
+
+        self.select_output_device_index(*selected, cx);
     }
 
     fn selected_input_device_name_raw(&self) -> Option<&str> {
@@ -42,32 +227,6 @@ impl MeetingHostShell {
         self.selected_output_index
             .and_then(|index| self.output_devices.get(index))
             .map(String::as_str)
-    }
-
-    pub(crate) fn toggle_input_dropdown(&mut self, cx: &mut Context<Self>) {
-        self.show_input_dropdown = !self.show_input_dropdown;
-        if self.show_input_dropdown {
-            self.show_output_dropdown = false;
-        }
-        self.notify_views(cx);
-    }
-
-    pub(crate) fn toggle_output_dropdown(&mut self, cx: &mut Context<Self>) {
-        self.show_output_dropdown = !self.show_output_dropdown;
-        if self.show_output_dropdown {
-            self.show_input_dropdown = false;
-        }
-        self.notify_views(cx);
-    }
-
-    pub(crate) fn close_audio_dropdowns(&mut self, cx: &mut Context<Self>) {
-        if !self.show_input_dropdown && !self.show_output_dropdown {
-            return;
-        }
-
-        self.show_input_dropdown = false;
-        self.show_output_dropdown = false;
-        self.notify_views(cx);
     }
 
     pub(crate) fn toggle_speaker_output(&mut self, cx: &mut Context<Self>) {
@@ -133,7 +292,6 @@ impl MeetingHostShell {
         self.selected_input_index = Some(index);
         self.input_from_output = false;
         self.selected_input_output_index = None;
-        self.show_input_dropdown = false;
         self.announce_audio_route_change("Input device selected", cx);
     }
 
@@ -150,7 +308,6 @@ impl MeetingHostShell {
 
         self.selected_input_output_index = Some(index);
         self.input_from_output = true;
-        self.show_input_dropdown = false;
         self.announce_audio_route_change("Input source switched to output loopback", cx);
     }
 
@@ -166,7 +323,6 @@ impl MeetingHostShell {
         }
 
         self.selected_output_index = Some(index);
-        self.show_output_dropdown = false;
         self.announce_audio_route_change("Output device selected", cx);
     }
 
@@ -189,7 +345,35 @@ pub(crate) fn render_level_meter(
     level_percent: usize,
     active: bool,
 ) -> impl IntoElement {
-    level_meter(label, level_percent, active)
+    let bars = 20usize;
+    let active_bars = (level_percent.min(100) * bars) / 100;
+
+    let mut row = div().flex().items_center().gap_0p5().h_4();
+    for index in 0..bars {
+        let bar_color = if !active || index >= active_bars {
+            0x161f2e
+        } else if index >= bars * 9 / 10 {
+            0x8f2236
+        } else if index >= bars * 7 / 10 {
+            0xb7792a
+        } else {
+            0x12a596
+        };
+
+        row = row.child(div().w_1().h_full().rounded_sm().bg(rgb(bar_color)));
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(0x65748b))
+                .child(label.to_string()),
+        )
+        .child(row)
 }
 
 pub(crate) fn audio_device_icon(name: &str) -> IconName {

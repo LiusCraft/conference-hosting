@@ -1,13 +1,11 @@
 use gpui::{div, prelude::*, rgb, ClickEvent, Context, Div, Window, WindowControlArea};
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
+use gpui_component::Disableable;
 
-use crate::app::shell::{ui_icon, MeetingHostShell};
+use crate::app::shell::{ui_button_icon, ButtonIconTone, MeetingHostShell};
 use crate::app::state::ConnectionState;
 use crate::components::icon::IconName;
-use crate::components::ui::{
-    floating_badge_button, message_empty_state, message_list, square_icon_button, text_input_shell,
-    UiTone,
-};
 
 impl MeetingHostShell {
     pub(crate) fn render_chat_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -54,7 +52,11 @@ impl MeetingHostShell {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(ui_icon(IconName::AudioLines, 14.0, 0x16d9c0))
+                    .child(ui_button_icon(
+                        IconName::AudioLines,
+                        14.0,
+                        ButtonIconTone::Info,
+                    ))
                     .child(div().text_lg().text_color(rgb(0xd7deec)).child("会话记录"))
                     .child(
                         div()
@@ -91,11 +93,29 @@ impl MeetingHostShell {
     }
 
     fn render_message_stream_panel(&mut self, cx: &mut Context<Self>) -> Div {
-        let mut message_stream = message_list(&self.chat_scroll);
+        let mut message_stream = div()
+            .id("message-stream")
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_1()
+            .min_h_0()
+            .track_scroll(&self.chat_scroll)
+            .overflow_y_scroll()
+            .scrollbar_width(gpui::px(10.0))
+            .pr_2()
+            .py_3()
+            .bg(rgb(0x050912));
 
         if self.chat_messages.is_empty() {
-            message_stream =
-                message_stream.child(message_empty_state("暂无消息，连接后会显示实时会话记录。"));
+            message_stream = message_stream.child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .text_sm()
+                    .text_color(rgb(0x7b8798))
+                    .child("暂无消息，连接后会显示实时会话记录。"),
+            );
         } else {
             message_stream =
                 message_stream.children(self.chat_messages.iter().rev().enumerate().map(
@@ -124,21 +144,32 @@ impl MeetingHostShell {
             } else {
                 format!("{} 条新消息", self.pending_chat_messages)
             };
+            let view = cx.entity().downgrade();
 
             message_stream_panel = message_stream_panel.child(
-                floating_badge_button(
-                    ui_icon(IconName::ChevronDown, 12.0, 0x8fa8ca),
-                    pending_chat_label,
-                    UiTone::new(0x31425d, 0x111d30, 0xc6d4e7),
-                    true,
-                )
-                .id("jump-to-latest-chat")
-                .absolute()
-                .right_5()
-                .bottom_4()
-                .on_click(
-                    cx.listener(|view, _event, _window, cx| view.jump_to_latest_chat_messages(cx)),
-                ),
+                Button::new("jump-to-latest-chat")
+                    .info()
+                    .h_11()
+                    .px_4()
+                    .rounded_full()
+                    .absolute()
+                    .right_5()
+                    .bottom_4()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(ui_button_icon(
+                                IconName::ChevronDown,
+                                12.0,
+                                ButtonIconTone::Info,
+                            ))
+                            .child(pending_chat_label),
+                    )
+                    .on_click(move |_, _, cx| {
+                        let _ = view.update(cx, |view, cx| view.jump_to_latest_chat_messages(cx));
+                    }),
             );
         }
 
@@ -182,36 +213,57 @@ impl MeetingHostShell {
             0x283449
         };
 
-        text_input_shell(
-            border_hex,
-            Input::new(&self.chat_input_state)
-                .appearance(false)
-                .bordered(false)
-                .focus_bordered(false)
-                .text_color(rgb(0xe8efff))
-                .suffix(div().text_sm().text_color(rgb(0x4f5e76)).child("Enter")),
-        )
-        .id("text-draft-input")
+        div()
+            .id("text-draft-input")
+            .flex_1()
+            .h_11()
+            .px_3()
+            .rounded_md()
+            .border_1()
+            .cursor_text()
+            .border_color(rgb(border_hex))
+            .bg(rgb(0x090f1b))
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                Input::new(&self.chat_input_state)
+                    .appearance(false)
+                    .bordered(false)
+                    .focus_bordered(false)
+                    .text_color(rgb(0xe8efff))
+                    .suffix(div().text_sm().text_color(rgb(0x4f5e76)).child("Enter")),
+            )
     }
 
     fn render_send_button(&self, is_connected: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let can_send_text = is_connected && self.chat_input_has_text(cx);
+        let view = cx.entity().downgrade();
 
         if can_send_text {
-            square_icon_button(
-                ui_icon(IconName::Send, 14.0, 0x9af9ef),
-                UiTone::new(0x115f58, 0x0f5a54, 0x9af9ef),
-                true,
-            )
-            .id("send-text-button")
-            .on_click(cx.listener(|view, _event, window, cx| view.send_text_draft(window, cx)))
+            Button::new("send-text-button")
+                .primary()
+                .size_11()
+                .p_0()
+                .child(ui_button_icon(
+                    IconName::Send,
+                    14.0,
+                    ButtonIconTone::Primary,
+                ))
+                .on_click(move |_, window, cx| {
+                    let _ = view.update(cx, |view, cx| view.send_text_draft(window, cx));
+                })
         } else {
-            square_icon_button(
-                ui_icon(IconName::Send, 14.0, 0x556178),
-                UiTone::new(0x2a3448, 0x111928, 0x556178),
-                false,
-            )
-            .id("send-text-button")
+            Button::new("send-text-button")
+                .outline()
+                .disabled(true)
+                .size_11()
+                .p_0()
+                .child(ui_button_icon(
+                    IconName::Send,
+                    14.0,
+                    ButtonIconTone::Disabled,
+                ))
         }
     }
 }

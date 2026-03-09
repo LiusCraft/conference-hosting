@@ -1,7 +1,7 @@
 pub mod panel;
 pub mod view;
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{px, Context, SharedString};
 use host_core::InboundTextMessage;
@@ -11,6 +11,8 @@ use crate::app::shell::MeetingHostShell;
 use crate::app::state::{
     ChatMessage, ChatRole, CHAT_BOTTOM_EPSILON_PX, MAX_CHAT_MESSAGES, TTS_APPEND_REUSE_WINDOW_MS,
 };
+
+const RESPONSE_LATENCY_PENDING_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl MeetingHostShell {
     pub(crate) fn push_inbound_message(&mut self, message: InboundTextMessage) {
@@ -33,6 +35,8 @@ impl MeetingHostShell {
         if role == ChatRole::Assistant && self.is_duplicate_assistant_message(body.as_str()) {
             return;
         }
+
+        self.maybe_track_stt_response_latency_anchor(&message, role, title.as_str());
 
         let response_latency_ms = if role == ChatRole::Assistant {
             self.consume_response_latency(&message)
@@ -260,9 +264,37 @@ impl MeetingHostShell {
             return None;
         }
 
+        let now = Instant::now();
+        while self
+            .pending_detect_requests
+            .front()
+            .is_some_and(|started_at| {
+                now.duration_since(*started_at) > RESPONSE_LATENCY_PENDING_TIMEOUT
+            })
+        {
+            self.pending_detect_requests.pop_front();
+        }
+
         self.pending_detect_requests
             .pop_front()
-            .map(|request_started_at| duration_to_millis(request_started_at.elapsed()))
+            .map(|request_started_at| duration_to_millis(now.duration_since(request_started_at)))
+    }
+
+    fn maybe_track_stt_response_latency_anchor(
+        &mut self,
+        message: &InboundTextMessage,
+        role: ChatRole,
+        title: &str,
+    ) {
+        if role != ChatRole::User || title != "STT" {
+            return;
+        }
+
+        if !should_track_stt_response_latency(&message.payload) {
+            return;
+        }
+
+        self.pending_detect_requests.push_back(Instant::now());
     }
 
     fn is_duplicate_assistant_message(&self, body: &str) -> bool {
@@ -471,6 +503,22 @@ fn is_assistant_text_message(message: &InboundTextMessage) -> bool {
         }
         _ => false,
     }
+}
+
+fn should_track_stt_response_latency(payload: &Map<String, Value>) -> bool {
+    if read_bool_field(payload, "is_final") == Some(false) {
+        return false;
+    }
+
+    let state = read_string_field(payload, "state")
+        .map(str::trim)
+        .filter(|state| !state.is_empty())
+        .map(str::to_ascii_lowercase);
+
+    !matches!(
+        state.as_deref(),
+        Some("partial" | "interim" | "listening" | "start" | "sentence_start")
+    )
 }
 
 fn is_llm_emotion_placeholder(text: &str) -> bool {
@@ -697,6 +745,7 @@ pub(crate) fn chat_message_header(message: &ChatMessage) -> String {
 mod tests {
     use super::{
         extract_intent_trace_turn_key, format_response_latency, is_llm_emotion_placeholder,
+        should_track_stt_response_latency,
     };
 
     #[test]
@@ -726,5 +775,31 @@ mod tests {
     fn response_latency_format_is_stable() {
         assert_eq!(format_response_latency(980), "980ms");
         assert_eq!(format_response_latency(1_200), "1.2s");
+    }
+
+    #[test]
+    fn stt_latency_tracking_prefers_final_results() {
+        let partial = serde_json::json!({ "state": "partial", "text": "你好" });
+        assert!(!should_track_stt_response_latency(
+            partial.as_object().expect("object"),
+        ));
+
+        let explicit_non_final = serde_json::json!({
+            "is_final": false,
+            "text": "你好"
+        });
+        assert!(!should_track_stt_response_latency(
+            explicit_non_final.as_object().expect("object"),
+        ));
+
+        let final_state = serde_json::json!({ "state": "final", "text": "你好" });
+        assert!(should_track_stt_response_latency(
+            final_state.as_object().expect("object"),
+        ));
+
+        let state_missing = serde_json::json!({ "text": "你好" });
+        assert!(should_track_stt_response_latency(
+            state_missing.as_object().expect("object"),
+        ));
     }
 }

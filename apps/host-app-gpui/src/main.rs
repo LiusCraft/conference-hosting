@@ -29,6 +29,39 @@ fn main() {
                 theme.muted_foreground = rgb(0x57657d).into();
                 theme.caret = rgb(0x79f7ee).into();
                 theme.selection = rgb(0x1a5f8f).into();
+                theme.border = rgb(0x2a3547).into();
+                theme.input = rgb(0x2a3547).into();
+                theme.ring = rgb(0x57e9d8).into();
+
+                theme.secondary = rgb(0x223047).into();
+                theme.secondary_hover = rgb(0x2b3d58).into();
+                theme.secondary_active = rgb(0x1c2a40).into();
+                theme.secondary_foreground = rgb(0xcfd8e8).into();
+
+                theme.primary = rgb(0x0f5f59).into();
+                theme.primary_hover = rgb(0x12736b).into();
+                theme.primary_active = rgb(0x0b4e49).into();
+                theme.primary_foreground = rgb(0xe8fffb).into();
+
+                theme.success = rgb(0x15554e).into();
+                theme.success_hover = rgb(0x1b6a61).into();
+                theme.success_active = rgb(0x104640).into();
+                theme.success_foreground = rgb(0xe2fff9).into();
+
+                theme.info = rgb(0x214f77).into();
+                theme.info_hover = rgb(0x2b6290).into();
+                theme.info_active = rgb(0x1a4364).into();
+                theme.info_foreground = rgb(0xe6f3ff).into();
+
+                theme.warning = rgb(0x5c4720).into();
+                theme.warning_hover = rgb(0x72572a).into();
+                theme.warning_active = rgb(0x4b3a1a).into();
+                theme.warning_foreground = rgb(0xfdecc8).into();
+
+                theme.danger = rgb(0x7a2432).into();
+                theme.danger_hover = rgb(0x913043).into();
+                theme.danger_active = rgb(0x651b29).into();
+                theme.danger_foreground = rgb(0xffe7ec).into();
             }
 
             cx.bind_keys([

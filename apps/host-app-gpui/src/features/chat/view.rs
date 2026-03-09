@@ -1,4 +1,5 @@
 use gpui::{div, prelude::*, rgb, Context, FontWeight, SharedString};
+use gpui_component::button::{Button, ButtonVariants as _};
 
 use crate::app::shell::{ui_icon, MeetingHostShell};
 use crate::app::state::{ChatMessage, ChatRole};
@@ -122,31 +123,26 @@ impl MeetingHostShell {
                 }
 
                 if is_collapsible {
+                    let view = cx.entity().downgrade();
                     trace_content = trace_content.child(
-                        div()
-                            .id(("toggle-trace-message", message_index))
+                        Button::new(("toggle-trace-message", message_index))
+                            .outline()
+                            .warning()
                             .mt_1()
                             .h_7()
                             .px_3()
-                            .rounded_md()
-                            .border_1()
-                            .cursor_pointer()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .border_color(rgb(0x5d4a1c))
-                            .bg(rgb(0x1b180b))
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(0xe7c87d))
                             .child(if is_collapsed {
                                 "展开调用详情"
                             } else {
                                 "收起调用详情"
                             })
-                            .on_click(cx.listener(move |view, _event, _window, cx| {
-                                view.toggle_trace_message_collapse(message_index, cx)
-                            })),
+                            .on_click(move |_, _, cx| {
+                                let _ = view.update(cx, |view, cx| {
+                                    view.toggle_trace_message_collapse(message_index, cx)
+                                });
+                            }),
                     );
                 }
 

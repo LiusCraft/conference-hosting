@@ -2,21 +2,22 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    div, prelude::*, rgb, ClickEvent, Context, Div, Entity, Render, ScrollHandle, SharedString,
-    Stateful, Window, WindowControlArea,
+    div, prelude::*, rgb, rgba, ClickEvent, Context, Div, Entity, Render, ScrollHandle,
+    SharedString, Stateful, Window, WindowControlArea,
 };
 use gpui_component::input::{InputEvent, InputState};
 use host_core::GatewayStatus;
 use tokio::sync::mpsc;
 
-use crate::app::config::build_gateway_config;
+use crate::app::config::{build_gateway_config, env_or_default};
 use crate::app::state::{
     ChatMessage, ChatRole, ConnectionState, GatewayCommand, UiGatewayEvent, APP_TITLE,
-    DEFAULT_WS_URL,
+    DEFAULT_CLIENT_ID, DEFAULT_DEVICE_MAC, DEFAULT_TOKEN, DEFAULT_WS_URL,
 };
-use crate::components::{
-    icon::{icon, IconName},
-    ui::{modal_backdrop, modal_center_layer, modal_overlay_root},
+use crate::components::icon::{icon, IconName};
+use crate::features::audio::{
+    build_input_select_items, build_output_select_items, selected_input_selection,
+    InputSelectEvent, InputSelectState, OutputSelectEvent, OutputSelectState,
 };
 use crate::features::chat::{load_history_chat_messages, wall_clock_label};
 use crate::gateway_runtime::{
@@ -24,12 +25,16 @@ use crate::gateway_runtime::{
 };
 
 const AUDIO_EVENT_UI_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+const RESPONSE_LATENCY_SAMPLE_SIZE: usize = 5;
 
 pub(crate) struct MeetingHostShell {
     pub(crate) connection_state: ConnectionState,
     pub(crate) gateway_status: GatewayStatus,
     pub(crate) ws_url: String,
+    pub(crate) ws_url_draft: String,
     pub(crate) session_id: Option<SharedString>,
+    pub(crate) connected_at: Option<Instant>,
+    pub(crate) network_rtt_ms: Option<u32>,
     pub(crate) uplink_audio_frames: usize,
     pub(crate) uplink_audio_bytes: usize,
     pub(crate) uplink_streaming: bool,
@@ -38,8 +43,22 @@ pub(crate) struct MeetingHostShell {
     pub(crate) ws_command_tx: Option<mpsc::Sender<GatewayCommand>>,
     pub(crate) chat_input_state: Entity<InputState>,
     pub(crate) ws_url_input_state: Entity<InputState>,
+    pub(crate) auth_token_input_state: Entity<InputState>,
+    pub(crate) device_id_input_state: Entity<InputState>,
+    pub(crate) client_id_input_state: Entity<InputState>,
+    pub(crate) input_select_state: Entity<InputSelectState>,
+    pub(crate) output_select_state: Entity<OutputSelectState>,
     pub(crate) chat_input_focused: bool,
     pub(crate) ws_url_input_focused: bool,
+    pub(crate) auth_token_input_focused: bool,
+    pub(crate) device_id_input_focused: bool,
+    pub(crate) client_id_input_focused: bool,
+    pub(crate) auth_token: String,
+    pub(crate) auth_token_draft: String,
+    pub(crate) device_id: String,
+    pub(crate) device_id_draft: String,
+    pub(crate) client_id: String,
+    pub(crate) client_id_draft: String,
     pub(crate) chat_scroll: ScrollHandle,
     pub(crate) settings_scroll: ScrollHandle,
     pub(crate) input_devices: Vec<String>,
@@ -48,11 +67,19 @@ pub(crate) struct MeetingHostShell {
     pub(crate) selected_input_output_index: Option<usize>,
     pub(crate) input_from_output: bool,
     pub(crate) selected_output_index: Option<usize>,
-    pub(crate) show_input_dropdown: bool,
-    pub(crate) show_output_dropdown: bool,
     pub(crate) show_settings_panel: bool,
     pub(crate) speaker_output_enabled: bool,
+    pub(crate) aec_enabled: bool,
+    pub(crate) aec_enabled_draft: bool,
+    pub(crate) aec_stream_delay_ms: Option<u32>,
+    pub(crate) aec_capture_callback_delay_ms: Option<u32>,
+    pub(crate) aec_playback_callback_delay_ms: Option<u32>,
+    pub(crate) aec_playback_buffer_delay_ms: Option<u32>,
+    pub(crate) aec_processor_delay_ms: Option<i32>,
+    pub(crate) aec_erl_db: Option<f32>,
+    pub(crate) aec_erle_db: Option<f32>,
     pub(crate) show_ai_emotion_messages: bool,
+    pub(crate) show_ai_emotion_messages_draft: bool,
     pub(crate) chat_messages: Vec<ChatMessage>,
     pub(crate) pending_detect_requests: VecDeque<Instant>,
     pub(crate) active_tts_message_index: Option<usize>,
@@ -68,7 +95,12 @@ impl MeetingHostShell {
         cx: &mut Context<Self>,
         audio_state: AudioDeviceState,
     ) -> Self {
-        let initial_ws_url = crate::app::config::env_or_default("HOST_WS_URL", DEFAULT_WS_URL);
+        let initial_ws_url = env_or_default("HOST_WS_URL", DEFAULT_WS_URL);
+        let initial_device_mac = env_or_default("HOST_DEVICE_MAC", DEFAULT_DEVICE_MAC);
+        let initial_device_id = env_or_default("HOST_DEVICE_ID", &initial_device_mac);
+        let initial_client_id = env_or_default("HOST_CLIENT_ID", DEFAULT_CLIENT_ID);
+        let initial_auth_token = env_or_default("HOST_TOKEN", DEFAULT_TOKEN);
+        let initial_aec_enabled = env_bool_or_default("HOST_ENABLE_AEC", true);
         let chat_input_state = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("输入指令 (例: listen detect)")
@@ -79,6 +111,45 @@ impl MeetingHostShell {
                 .placeholder("ws://host/path?device-id=...")
                 .default_value(initial_ws_url.clone())
         });
+        let auth_token_input_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("token（自动拼接 Bearer）")
+                .default_value(initial_auth_token.clone())
+        });
+        let device_id_input_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("device-id")
+                .default_value(initial_device_id.clone())
+        });
+        let client_id_input_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("client-id")
+                .default_value(initial_client_id.clone())
+        });
+        let input_select_items =
+            build_input_select_items(&audio_state.input_devices, &audio_state.output_devices);
+        let output_select_items = build_output_select_items(&audio_state.output_devices);
+
+        let input_select_state =
+            cx.new(|cx| InputSelectState::new(input_select_items, None, window, cx));
+        let output_select_state =
+            cx.new(|cx| OutputSelectState::new(output_select_items, None, window, cx));
+
+        if let Some(selection) = selected_input_selection(
+            audio_state.input_from_output,
+            audio_state.selected_input_index,
+            audio_state.selected_input_output_index,
+        ) {
+            input_select_state.update(cx, |state, cx| {
+                state.set_selected_value(&selection, window, cx);
+            });
+        }
+
+        if let Some(output_index) = audio_state.selected_output_index {
+            output_select_state.update(cx, |state, cx| {
+                state.set_selected_value(&output_index, window, cx);
+            });
+        }
 
         cx.subscribe_in(
             &chat_input_state,
@@ -96,12 +167,55 @@ impl MeetingHostShell {
             },
         )
         .detach();
+        cx.subscribe_in(
+            &auth_token_input_state,
+            window,
+            |view, _state, event: &InputEvent, window, cx| {
+                view.handle_auth_token_input_event(event, window, cx);
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &device_id_input_state,
+            window,
+            |view, _state, event: &InputEvent, window, cx| {
+                view.handle_device_id_input_event(event, window, cx);
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &client_id_input_state,
+            window,
+            |view, _state, event: &InputEvent, window, cx| {
+                view.handle_client_id_input_event(event, window, cx);
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &input_select_state,
+            window,
+            |view, _state, event: &InputSelectEvent, _window, cx| {
+                view.handle_input_select_event(event, cx);
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &output_select_state,
+            window,
+            |view, _state, event: &OutputSelectEvent, _window, cx| {
+                view.handle_output_select_event(event, cx);
+            },
+        )
+        .detach();
 
         Self {
             connection_state: ConnectionState::Idle,
             gateway_status: GatewayStatus::Idle,
-            ws_url: initial_ws_url,
+            ws_url: initial_ws_url.clone(),
+            ws_url_draft: initial_ws_url,
             session_id: None,
+            connected_at: None,
+            network_rtt_ms: None,
             uplink_audio_frames: 0,
             uplink_audio_bytes: 0,
             uplink_streaming: false,
@@ -110,8 +224,22 @@ impl MeetingHostShell {
             ws_command_tx: None,
             chat_input_state,
             ws_url_input_state,
+            auth_token_input_state,
+            device_id_input_state,
+            client_id_input_state,
+            input_select_state,
+            output_select_state,
             chat_input_focused: false,
             ws_url_input_focused: false,
+            auth_token_input_focused: false,
+            device_id_input_focused: false,
+            client_id_input_focused: false,
+            auth_token: initial_auth_token.clone(),
+            auth_token_draft: initial_auth_token,
+            device_id: initial_device_id.clone(),
+            device_id_draft: initial_device_id,
+            client_id: initial_client_id.clone(),
+            client_id_draft: initial_client_id,
             chat_scroll: ScrollHandle::new(),
             settings_scroll: ScrollHandle::new(),
             input_devices: audio_state.input_devices,
@@ -120,11 +248,19 @@ impl MeetingHostShell {
             selected_input_output_index: audio_state.selected_input_output_index,
             input_from_output: audio_state.input_from_output,
             selected_output_index: audio_state.selected_output_index,
-            show_input_dropdown: false,
-            show_output_dropdown: false,
             show_settings_panel: false,
             speaker_output_enabled: true,
+            aec_enabled: initial_aec_enabled,
+            aec_enabled_draft: initial_aec_enabled,
+            aec_stream_delay_ms: None,
+            aec_capture_callback_delay_ms: None,
+            aec_playback_callback_delay_ms: None,
+            aec_playback_buffer_delay_ms: None,
+            aec_processor_delay_ms: None,
+            aec_erl_db: None,
+            aec_erle_db: None,
             show_ai_emotion_messages: false,
+            show_ai_emotion_messages_draft: false,
             chat_messages: load_history_chat_messages(),
             pending_detect_requests: VecDeque::new(),
             active_tts_message_index: None,
@@ -136,8 +272,6 @@ impl MeetingHostShell {
     }
 
     pub(crate) fn prepare_for_window_close(&mut self) {
-        self.show_input_dropdown = false;
-        self.show_output_dropdown = false;
         self.show_settings_panel = false;
 
         if !matches!(self.connection_state, ConnectionState::Connected) {
@@ -153,7 +287,15 @@ impl MeetingHostShell {
         self.pending_detect_requests.clear();
         self.active_tts_message_index = None;
         self.active_intent_trace_message_index = None;
+        self.network_rtt_ms = None;
         self.last_audio_event_ui_refresh_at = None;
+        self.aec_stream_delay_ms = None;
+        self.aec_capture_callback_delay_ms = None;
+        self.aec_playback_callback_delay_ms = None;
+        self.aec_playback_buffer_delay_ms = None;
+        self.aec_processor_delay_ms = None;
+        self.aec_erl_db = None;
+        self.aec_erle_db = None;
     }
 
     pub(crate) fn notify_views(&self, cx: &mut Context<Self>) {
@@ -165,12 +307,25 @@ impl MeetingHostShell {
             return;
         }
 
-        self.sync_ws_url_from_input(cx);
-        let config = build_gateway_config(Some(self.ws_url.as_str()));
+        let config = build_gateway_config(
+            Some(self.ws_url.as_str()),
+            Some(self.device_id.as_str()),
+            Some(self.client_id.as_str()),
+            Some(self.auth_token.as_str()),
+        );
         let audio_routing = self.build_audio_routing_config();
         self.ws_url = config.server_url.clone();
+        self.device_id = config.device_id.clone();
+        self.client_id = config.client_id.clone();
+        self.auth_token = config.token.clone();
         self.connection_state = ConnectionState::Connecting;
         self.session_id = None;
+        self.connected_at = None;
+        self.network_rtt_ms = None;
+        self.uplink_audio_frames = 0;
+        self.uplink_audio_bytes = 0;
+        self.downlink_audio_frames = 0;
+        self.downlink_audio_bytes = 0;
         self.uplink_streaming = false;
         self.pending_detect_requests.clear();
         self.active_tts_message_index = None;
@@ -224,7 +379,15 @@ impl MeetingHostShell {
                 self.pending_detect_requests.clear();
                 self.active_tts_message_index = None;
                 self.active_intent_trace_message_index = None;
+                self.network_rtt_ms = None;
                 self.last_audio_event_ui_refresh_at = None;
+                self.aec_stream_delay_ms = None;
+                self.aec_capture_callback_delay_ms = None;
+                self.aec_playback_callback_delay_ms = None;
+                self.aec_playback_buffer_delay_ms = None;
+                self.aec_processor_delay_ms = None;
+                self.aec_erl_db = None;
+                self.aec_erle_db = None;
                 self.push_chat(ChatRole::System, "System", "Disconnect requested");
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -245,10 +408,23 @@ impl MeetingHostShell {
                 self.uplink_streaming = false;
                 self.ws_command_tx = None;
                 self.session_id = None;
+                self.connected_at = None;
+                self.network_rtt_ms = None;
+                self.uplink_audio_frames = 0;
+                self.uplink_audio_bytes = 0;
+                self.downlink_audio_frames = 0;
+                self.downlink_audio_bytes = 0;
                 self.pending_detect_requests.clear();
                 self.active_tts_message_index = None;
                 self.active_intent_trace_message_index = None;
                 self.last_audio_event_ui_refresh_at = None;
+                self.aec_stream_delay_ms = None;
+                self.aec_capture_callback_delay_ms = None;
+                self.aec_playback_callback_delay_ms = None;
+                self.aec_playback_buffer_delay_ms = None;
+                self.aec_processor_delay_ms = None;
+                self.aec_erl_db = None;
+                self.aec_erle_db = None;
             }
         }
 
@@ -313,6 +489,12 @@ impl MeetingHostShell {
                 self.uplink_streaming = false;
                 self.ws_command_tx = None;
                 self.session_id = None;
+                self.connected_at = None;
+                self.network_rtt_ms = None;
+                self.uplink_audio_frames = 0;
+                self.uplink_audio_bytes = 0;
+                self.downlink_audio_frames = 0;
+                self.downlink_audio_bytes = 0;
                 self.pending_detect_requests.clear();
                 self.active_tts_message_index = None;
                 self.active_intent_trace_message_index = None;
@@ -329,7 +511,20 @@ impl MeetingHostShell {
                 self.connection_state = ConnectionState::Connected;
                 self.gateway_status = GatewayStatus::Connected;
                 self.session_id = Some(session_id.clone().into());
+                self.connected_at = Some(Instant::now());
+                self.network_rtt_ms = None;
+                self.uplink_audio_frames = 0;
+                self.uplink_audio_bytes = 0;
+                self.downlink_audio_frames = 0;
+                self.downlink_audio_bytes = 0;
                 self.last_audio_event_ui_refresh_at = None;
+                self.aec_stream_delay_ms = None;
+                self.aec_capture_callback_delay_ms = None;
+                self.aec_playback_callback_delay_ms = None;
+                self.aec_playback_buffer_delay_ms = None;
+                self.aec_processor_delay_ms = None;
+                self.aec_erl_db = None;
+                self.aec_erle_db = None;
                 self.push_chat(
                     ChatRole::System,
                     "System",
@@ -343,10 +538,23 @@ impl MeetingHostShell {
                 self.uplink_streaming = false;
                 self.ws_command_tx = None;
                 self.session_id = None;
+                self.connected_at = None;
+                self.network_rtt_ms = None;
+                self.uplink_audio_frames = 0;
+                self.uplink_audio_bytes = 0;
+                self.downlink_audio_frames = 0;
+                self.downlink_audio_bytes = 0;
                 self.pending_detect_requests.clear();
                 self.active_tts_message_index = None;
                 self.active_intent_trace_message_index = None;
                 self.last_audio_event_ui_refresh_at = None;
+                self.aec_stream_delay_ms = None;
+                self.aec_capture_callback_delay_ms = None;
+                self.aec_playback_callback_delay_ms = None;
+                self.aec_playback_buffer_delay_ms = None;
+                self.aec_processor_delay_ms = None;
+                self.aec_erl_db = None;
+                self.aec_erle_db = None;
                 self.push_chat(ChatRole::System, "System", "Gateway disconnected");
                 true
             }
@@ -390,6 +598,33 @@ impl MeetingHostShell {
                 self.downlink_audio_bytes += frame_bytes;
                 self.should_refresh_audio_event_ui(Instant::now())
             }
+            UiGatewayEvent::NetworkRttUpdated(rtt_ms) => {
+                self.network_rtt_ms = Some(rtt_ms);
+                true
+            }
+            UiGatewayEvent::AecStateChanged(enabled) => {
+                self.aec_enabled = enabled;
+                if !enabled {
+                    self.aec_stream_delay_ms = None;
+                    self.aec_capture_callback_delay_ms = None;
+                    self.aec_playback_callback_delay_ms = None;
+                    self.aec_playback_buffer_delay_ms = None;
+                    self.aec_processor_delay_ms = None;
+                    self.aec_erl_db = None;
+                    self.aec_erle_db = None;
+                }
+                true
+            }
+            UiGatewayEvent::AecStats(stats) => {
+                self.aec_stream_delay_ms = Some(stats.stream_delay_ms);
+                self.aec_capture_callback_delay_ms = Some(stats.capture_callback_delay_ms);
+                self.aec_playback_callback_delay_ms = Some(stats.playback_callback_delay_ms);
+                self.aec_playback_buffer_delay_ms = Some(stats.playback_buffer_delay_ms);
+                self.aec_processor_delay_ms = Some(stats.processor_delay_ms);
+                self.aec_erl_db = Some(stats.erl_db);
+                self.aec_erle_db = Some(stats.erle_db);
+                self.should_refresh_audio_event_ui(Instant::now())
+            }
         };
 
         if should_notify {
@@ -408,6 +643,73 @@ impl MeetingHostShell {
         } else {
             false
         }
+    }
+
+    fn session_uptime_label(&self) -> Option<String> {
+        self.connected_at
+            .map(|connected_at| format_elapsed_duration(connected_at.elapsed()))
+    }
+
+    fn transport_rate_label(&self, frames: usize, bytes: usize) -> String {
+        let Some(connected_at) = self.connected_at else {
+            return "--".to_string();
+        };
+
+        let elapsed_seconds = connected_at.elapsed().as_secs_f64();
+        if elapsed_seconds < 0.2 {
+            return "--".to_string();
+        }
+
+        let fps = frames as f64 / elapsed_seconds;
+        let kbps = (bytes as f64 * 8.0) / elapsed_seconds / 1_000.0;
+        format!("{fps:.1}fps {kbps:.1}kbps")
+    }
+
+    fn response_latency_label(&self) -> String {
+        if self.connected_at.is_none() {
+            return "响应 --".to_string();
+        }
+
+        let mut latest_latency_ms: Option<u64> = None;
+        let mut sample_count = 0usize;
+        let mut latency_sum = 0u128;
+
+        for message in &self.chat_messages {
+            if is_handshake_system_message(message) {
+                break;
+            }
+
+            let Some(response_latency_ms) = message.response_latency_ms.filter(|value| *value > 0)
+            else {
+                continue;
+            };
+
+            if latest_latency_ms.is_none() {
+                latest_latency_ms = Some(response_latency_ms);
+            }
+
+            if sample_count < RESPONSE_LATENCY_SAMPLE_SIZE {
+                latency_sum = latency_sum.saturating_add(response_latency_ms as u128);
+                sample_count = sample_count.saturating_add(1);
+            }
+        }
+
+        let Some(latest_latency_ms) = latest_latency_ms else {
+            return "响应 --".to_string();
+        };
+
+        if sample_count <= 1 {
+            return format!("响应 {}", format_latency_value(latest_latency_ms));
+        }
+
+        let average_latency_ms =
+            u64::try_from(latency_sum / sample_count as u128).unwrap_or(latest_latency_ms);
+        format!(
+            "响应 {} (近{} {})",
+            format_latency_value(latest_latency_ms),
+            sample_count,
+            format_latency_value(average_latency_ms)
+        )
     }
 
     fn render_custom_titlebar(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
@@ -441,7 +743,44 @@ impl MeetingHostShell {
     }
 
     fn render_status_bar(&self) -> Div {
-        let is_connected = matches!(self.connection_state, ConnectionState::Connected);
+        let has_active_session = self.connected_at.is_some();
+        let session_icon_color = if has_active_session {
+            0x16d9c0
+        } else {
+            0x6f7b8f
+        };
+        let session_text_color = if has_active_session {
+            0x16d9c0
+        } else {
+            0x6f7b8f
+        };
+        let session_label = self
+            .session_uptime_label()
+            .map(|uptime| format!("会话 {uptime}"))
+            .unwrap_or_else(|| "会话 未连接".to_string());
+        let uplink_label = format!(
+            "上行 {}",
+            self.transport_rate_label(self.uplink_audio_frames, self.uplink_audio_bytes)
+        );
+        let downlink_label = format!(
+            "下行 {}",
+            self.transport_rate_label(self.downlink_audio_frames, self.downlink_audio_bytes)
+        );
+        let response_latency_label = self.response_latency_label();
+        let network_rtt_label = self
+            .network_rtt_ms
+            .map(|rtt_ms| format!("RTT {rtt_ms}ms"))
+            .unwrap_or_else(|| "RTT --".to_string());
+        let network_rtt_icon_color = if has_active_session && self.network_rtt_ms.is_some() {
+            0x16d9c0
+        } else {
+            0x6f7b8f
+        };
+        let network_rtt_text_color = if has_active_session && self.network_rtt_ms.is_some() {
+            0x16d9c0
+        } else {
+            0x6f7b8f
+        };
 
         div()
             .h_8()
@@ -459,23 +798,35 @@ impl MeetingHostShell {
                     .gap_4()
                     .text_sm()
                     .text_color(rgb(0x6f7b8f))
+                    .child(status_metric(
+                        IconName::Wifi,
+                        session_icon_color,
+                        session_text_color,
+                        session_label,
+                    ))
+                    .child(status_metric(
+                        IconName::Globe,
+                        network_rtt_icon_color,
+                        network_rtt_text_color,
+                        network_rtt_label,
+                    ))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(ui_icon(IconName::Cpu, 12.0, 0x6f7b8f))
-                            .child("CPU 2.3%"),
+                            .child(ui_icon(IconName::Mic, 12.0, 0x6f7b8f))
+                            .child(uplink_label),
                     )
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_1()
-                            .child(ui_icon(IconName::HardDrive, 12.0, 0x6f7b8f))
-                            .child("RAM 48 MB"),
+                            .child(ui_icon(IconName::Volume2, 12.0, 0x6f7b8f))
+                            .child(downlink_label),
                     )
-                    .children(if is_connected {
+                    .children(if has_active_session {
                         Some(
                             div()
                                 .flex()
@@ -483,11 +834,19 @@ impl MeetingHostShell {
                                 .gap_1()
                                 .text_color(rgb(0x16d9c0))
                                 .child(ui_icon(IconName::Zap, 12.0, 0x16d9c0))
-                                .child("延迟 ~700ms (采集 20ms + 网络 50ms + ASR 200ms + LLM 300ms + TTS 130ms)"),
+                                .child(response_latency_label),
                         )
                     } else {
                         None
-                    }),
+                    })
+                    .children(self.aec_stream_delay_ms.map(|delay_ms| {
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(ui_icon(IconName::Activity, 12.0, 0x6f7b8f))
+                            .child(format!("AEC {delay_ms}ms"))
+                    })),
             )
             .child(
                 div()
@@ -520,7 +879,6 @@ impl Render for MeetingHostShell {
             .flex_col()
             .min_h_0()
             .id("shell-body")
-            .on_click(cx.listener(|view, _event, _window, cx| view.close_audio_dropdowns(cx)))
             .children(custom_titlebar)
             .child(
                 div()
@@ -536,9 +894,33 @@ impl Render for MeetingHostShell {
             let settings_panel = self.render_settings_panel(window, cx);
 
             shell_body = shell_body.child(
-                modal_overlay_root()
-                    .child(modal_backdrop(0x020712d9).id("settings-backdrop"))
-                    .child(modal_center_layer().child(settings_panel)),
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .occlude()
+                    .child(
+                        div()
+                            .id("settings-backdrop")
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .bg(rgba(0x020712d9)),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .p_6()
+                            .child(settings_panel),
+                    ),
             );
         }
 
@@ -548,6 +930,78 @@ impl Render for MeetingHostShell {
 
 pub(crate) fn ui_icon(name: IconName, size_px: f32, color_hex: u32) -> gpui::Svg {
     icon(name, size_px, rgb(color_hex))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ButtonIconTone {
+    Primary,
+    Danger,
+    Warning,
+    Success,
+    Info,
+    Neutral,
+    Ghost,
+    Disabled,
+}
+
+pub(crate) fn ui_button_icon(name: IconName, size_px: f32, tone: ButtonIconTone) -> gpui::Svg {
+    let color_hex = match tone {
+        ButtonIconTone::Primary => 0xe8fffb,
+        ButtonIconTone::Danger => 0xffe7ec,
+        ButtonIconTone::Warning => 0xfdecc8,
+        ButtonIconTone::Success => 0xe2fff9,
+        ButtonIconTone::Info => 0xe6f3ff,
+        ButtonIconTone::Neutral => 0x9aa6ba,
+        ButtonIconTone::Ghost => 0x8a96ab,
+        ButtonIconTone::Disabled => 0x556178,
+    };
+
+    ui_icon(name, size_px, color_hex)
+}
+
+fn status_metric(
+    icon_name: IconName,
+    icon_color_hex: u32,
+    text_color_hex: u32,
+    label: impl Into<SharedString>,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_color(rgb(text_color_hex))
+        .child(ui_icon(icon_name, 12.0, icon_color_hex))
+        .child(label.into())
+}
+
+fn format_elapsed_duration(duration: Duration) -> String {
+    let total_seconds = duration.as_secs();
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+
+    if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+fn format_latency_value(latency_ms: u64) -> String {
+    if latency_ms < 1_000 {
+        format!("{latency_ms}ms")
+    } else {
+        format!("{:.1}s", latency_ms as f64 / 1_000.0)
+    }
+}
+
+fn is_handshake_system_message(message: &ChatMessage) -> bool {
+    message.role == ChatRole::System
+        && message.title.as_ref() == "System"
+        && message
+            .body
+            .as_ref()
+            .starts_with("Handshake finished, session_id=")
 }
 
 fn should_refresh_audio_event_ui(
@@ -561,9 +1015,24 @@ fn should_refresh_audio_event_ui(
     }
 }
 
+fn env_bool_or_default(key: &str, default: bool) -> bool {
+    std::env::var(key)
+        .ok()
+        .as_deref()
+        .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(default)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{should_refresh_audio_event_ui, AUDIO_EVENT_UI_REFRESH_INTERVAL};
+    use super::{
+        format_elapsed_duration, format_latency_value, should_refresh_audio_event_ui,
+        AUDIO_EVENT_UI_REFRESH_INTERVAL,
+    };
     use std::time::{Duration, Instant};
 
     #[test]
@@ -593,5 +1062,20 @@ mod tests {
             after_interval,
             AUDIO_EVENT_UI_REFRESH_INTERVAL,
         ));
+    }
+
+    #[test]
+    fn elapsed_duration_format_supports_mm_ss_and_hh_mm_ss() {
+        assert_eq!(format_elapsed_duration(Duration::from_secs(62)), "01:02");
+        assert_eq!(
+            format_elapsed_duration(Duration::from_secs(3_661)),
+            "01:01:01"
+        );
+    }
+
+    #[test]
+    fn latency_value_format_supports_ms_and_seconds() {
+        assert_eq!(format_latency_value(980), "980ms");
+        assert_eq!(format_latency_value(1_200), "1.2s");
     }
 }

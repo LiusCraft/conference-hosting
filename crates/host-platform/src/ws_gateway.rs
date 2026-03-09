@@ -97,6 +97,7 @@ impl WsGatewayConfig {
 pub enum WsGatewayEvent {
     Text(InboundTextMessage),
     DownlinkAudio(Vec<u8>),
+    Pong(Vec<u8>),
     MalformedText { raw: String, error: String },
     Closed,
     TransportError(String),
@@ -201,11 +202,14 @@ impl WsGatewayClient {
                     Ok(Message::Binary(binary)) => {
                         let _ = event_tx.send(WsGatewayEvent::DownlinkAudio(binary.to_vec()));
                     }
+                    Ok(Message::Pong(payload)) => {
+                        let _ = event_tx.send(WsGatewayEvent::Pong(payload.to_vec()));
+                    }
                     Ok(Message::Close(_)) => {
                         let _ = event_tx.send(WsGatewayEvent::Closed);
                         break;
                     }
-                    Ok(Message::Ping(_)) | Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => {}
+                    Ok(Message::Ping(_)) | Ok(Message::Frame(_)) => {}
                     Err(error) => {
                         let _ = event_tx.send(WsGatewayEvent::TransportError(error.to_string()));
                         break;
@@ -245,6 +249,12 @@ impl WsGatewayClient {
     pub async fn send_audio_frame(&self, frame: Vec<u8>) -> Result<(), WsGatewayError> {
         let mut sink = self.sink.lock().await;
         sink.send(Message::Binary(frame.into())).await?;
+        Ok(())
+    }
+
+    pub async fn send_ping(&self, payload: Vec<u8>) -> Result<(), WsGatewayError> {
+        let mut sink = self.sink.lock().await;
+        sink.send(Message::Ping(payload.into())).await?;
         Ok(())
     }
 
@@ -558,6 +568,89 @@ mod tests {
             other => panic!("expected hello timeout, got {other:?}"),
         }
 
+        server.await.expect("mock server task finished");
+    }
+
+    #[tokio::test]
+    async fn ws_gateway_emits_pong_event_after_ping() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let addr = listener.local_addr().expect("read local addr");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept socket");
+            let mut socket = accept_hdr_async(stream, accept_any_headers)
+                .await
+                .expect("upgrade websocket");
+
+            let _hello_raw = expect_text(
+                socket
+                    .next()
+                    .await
+                    .expect("hello frame exists")
+                    .expect("hello frame valid"),
+            );
+
+            socket
+                .send(Message::Text(
+                    serde_json::json!({
+                        "type": "hello",
+                        "session_id": "session-002"
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send hello ack");
+
+            let ping_payload = match socket
+                .next()
+                .await
+                .expect("ping frame exists")
+                .expect("ping frame valid")
+            {
+                Message::Ping(payload) => payload.to_vec(),
+                other => panic!("expected ping frame, got {other:?}"),
+            };
+
+            socket
+                .send(Message::Pong(ping_payload.clone().into()))
+                .await
+                .expect("send pong frame");
+        });
+
+        let config = WsGatewayConfig::new(
+            format!("ws://{addr}/xiaozhi/v1/"),
+            "dev-001",
+            "Host Desktop",
+            "AA:BB:CC:DD:EE:FF",
+            "host-client",
+            "token-demo",
+        );
+
+        let mut gateway = WsGatewayClient::connect(config)
+            .await
+            .expect("connect gateway client");
+
+        gateway
+            .send_ping(vec![1, 9, 9, 6])
+            .await
+            .expect("send ping frame");
+
+        let event = time::timeout(Duration::from_secs(1), gateway.next_event())
+            .await
+            .expect("wait pong event")
+            .expect("pong event exists");
+
+        match event {
+            WsGatewayEvent::Pong(payload) => {
+                assert_eq!(payload, vec![1, 9, 9, 6]);
+            }
+            other => panic!("expected pong event, got {other:?}"),
+        }
+
+        drop(gateway);
         server.await.expect("mock server task finished");
     }
 
