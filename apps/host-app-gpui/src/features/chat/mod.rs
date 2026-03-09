@@ -38,6 +38,11 @@ impl MeetingHostShell {
 
         self.maybe_track_stt_response_latency_anchor(&message, role, title.as_str());
 
+        if role == ChatRole::User && title == "STT" {
+            self.upsert_stt_transcript(body.as_str());
+            return;
+        }
+
         let response_latency_ms = if role == ChatRole::Assistant {
             self.consume_response_latency(&message)
         } else {
@@ -138,6 +143,8 @@ impl MeetingHostShell {
             return true;
         }
 
+        self.active_stt_message_index = None;
+
         if self.is_duplicate_assistant_message(text) {
             return true;
         }
@@ -163,6 +170,7 @@ impl MeetingHostShell {
         match state {
             "start" => {
                 self.active_tts_message_index = None;
+                self.active_stt_message_index = None;
             }
             "sentence_start" => {
                 let Some(text) = read_string_field(&message.payload, "text")
@@ -172,18 +180,56 @@ impl MeetingHostShell {
                     return true;
                 };
 
+                self.active_stt_message_index = None;
                 self.active_intent_trace_message_index = None;
                 let response_latency_ms = self.consume_response_latency(message);
                 self.upsert_tts_sentence_text(text, response_latency_ms);
             }
             "stop" => {
                 self.active_tts_message_index = None;
+                self.active_stt_message_index = None;
                 self.active_intent_trace_message_index = None;
                 if read_bool_field(&message.payload, "is_aborted") == Some(true) {
                     self.push_chat(ChatRole::System, "System", "TTS playback aborted");
                 }
             }
             _ => {}
+        }
+
+        true
+    }
+
+    fn upsert_stt_transcript(&mut self, transcript: &str) {
+        if self.append_to_active_stt_transcript(transcript) {
+            return;
+        }
+
+        self.push_chat(ChatRole::User, "STT", transcript.to_string());
+        self.active_stt_message_index = Some(0);
+    }
+
+    fn append_to_active_stt_transcript(&mut self, transcript: &str) -> bool {
+        let Some(index) = self.active_stt_message_index else {
+            return false;
+        };
+
+        let Some(message) = self.chat_messages.get_mut(index) else {
+            self.active_stt_message_index = None;
+            return false;
+        };
+
+        if message.role != ChatRole::User || message.title.as_ref() != "STT" {
+            self.active_stt_message_index = None;
+            return false;
+        }
+
+        let merged = merge_streaming_text(message.body.as_ref(), transcript);
+        if merged != message.body.as_ref() {
+            message.body = merged.into();
+        }
+
+        if self.follow_latest_chat_messages {
+            self.chat_scroll.scroll_to_bottom();
         }
 
         true
@@ -375,8 +421,16 @@ impl MeetingHostShell {
     ) {
         self.sync_chat_follow_state();
 
+        if role == ChatRole::Assistant {
+            self.active_stt_message_index = None;
+        }
+
         if let Some(index) = self.active_tts_message_index {
             self.active_tts_message_index = index.checked_add(1);
+        }
+
+        if let Some(index) = self.active_stt_message_index {
+            self.active_stt_message_index = index.checked_add(1);
         }
 
         if let Some(index) = self.active_intent_trace_message_index {
@@ -403,6 +457,12 @@ impl MeetingHostShell {
         if let Some(index) = self.active_tts_message_index {
             if index >= self.chat_messages.len() {
                 self.active_tts_message_index = None;
+            }
+        }
+
+        if let Some(index) = self.active_stt_message_index {
+            if index >= self.chat_messages.len() {
+                self.active_stt_message_index = None;
             }
         }
 
@@ -509,6 +569,58 @@ fn is_assistant_text_message(message: &InboundTextMessage) -> bool {
         }
         _ => false,
     }
+}
+
+fn merge_streaming_text(existing: &str, incoming: &str) -> String {
+    let incoming = incoming.trim();
+    if incoming.is_empty() {
+        return existing.to_string();
+    }
+
+    if existing.is_empty() {
+        return incoming.to_string();
+    }
+
+    if existing.ends_with(incoming) {
+        return existing.to_string();
+    }
+
+    if incoming.starts_with(existing) {
+        return incoming.to_string();
+    }
+
+    if existing.starts_with(incoming) {
+        return existing.to_string();
+    }
+
+    let overlap_chars = longest_suffix_prefix_overlap_chars(existing, incoming);
+    if overlap_chars == 0 {
+        return format!("{existing}{incoming}");
+    }
+
+    let split_index = byte_index_after_char_count(incoming, overlap_chars);
+    format!("{existing}{}", &incoming[split_index..])
+}
+
+fn longest_suffix_prefix_overlap_chars(left: &str, right: &str) -> usize {
+    let left_chars: Vec<char> = left.chars().collect();
+    let right_chars: Vec<char> = right.chars().collect();
+    let max_overlap = left_chars.len().min(right_chars.len());
+
+    for overlap in (1..=max_overlap).rev() {
+        if left_chars[left_chars.len() - overlap..] == right_chars[..overlap] {
+            return overlap;
+        }
+    }
+
+    0
+}
+
+fn byte_index_after_char_count(text: &str, char_count: usize) -> usize {
+    text.char_indices()
+        .nth(char_count)
+        .map(|(byte_index, _)| byte_index)
+        .unwrap_or(text.len())
 }
 
 fn should_track_stt_response_latency(payload: &Map<String, Value>) -> bool {
@@ -751,7 +863,7 @@ pub(crate) fn chat_message_header(message: &ChatMessage) -> String {
 mod tests {
     use super::{
         extract_intent_trace_turn_key, format_response_latency, is_llm_emotion_placeholder,
-        should_track_stt_response_latency,
+        merge_streaming_text, should_track_stt_response_latency,
     };
 
     #[test]
@@ -807,5 +919,16 @@ mod tests {
         assert!(should_track_stt_response_latency(
             state_missing.as_object().expect("object"),
         ));
+    }
+
+    #[test]
+    fn merge_streaming_text_avoids_duplicate_overlap() {
+        assert_eq!(merge_streaming_text("你好", "你好"), "你好");
+        assert_eq!(merge_streaming_text("你好", "你好呀"), "你好呀");
+        assert_eq!(merge_streaming_text("你好", "好呀"), "你好呀");
+        assert_eq!(
+            merge_streaming_text("你好，今天", "今天会议安排"),
+            "你好，今天会议安排"
+        );
     }
 }

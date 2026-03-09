@@ -83,6 +83,7 @@ pub(crate) struct MeetingHostShell {
     pub(crate) chat_messages: Vec<ChatMessage>,
     pub(crate) pending_detect_requests: VecDeque<Instant>,
     pub(crate) active_tts_message_index: Option<usize>,
+    pub(crate) active_stt_message_index: Option<usize>,
     pub(crate) active_intent_trace_message_index: Option<usize>,
     pub(crate) follow_latest_chat_messages: bool,
     pub(crate) pending_chat_messages: usize,
@@ -265,6 +266,7 @@ impl MeetingHostShell {
             chat_messages: load_history_chat_messages(),
             pending_detect_requests: VecDeque::new(),
             active_tts_message_index: None,
+            active_stt_message_index: None,
             active_intent_trace_message_index: None,
             follow_latest_chat_messages: true,
             pending_chat_messages: 0,
@@ -288,6 +290,7 @@ impl MeetingHostShell {
         self.uplink_streaming = false;
         self.pending_detect_requests.clear();
         self.active_tts_message_index = None;
+        self.active_stt_message_index = None;
         self.active_intent_trace_message_index = None;
         self.network_rtt_ms = None;
         self.last_audio_event_ui_refresh_at = None;
@@ -331,6 +334,7 @@ impl MeetingHostShell {
         self.uplink_streaming = false;
         self.pending_detect_requests.clear();
         self.active_tts_message_index = None;
+        self.active_stt_message_index = None;
         self.active_intent_trace_message_index = None;
         self.last_audio_event_ui_refresh_at = None;
         self.push_chat(
@@ -380,6 +384,7 @@ impl MeetingHostShell {
                 self.connection_state = ConnectionState::Disconnecting;
                 self.pending_detect_requests.clear();
                 self.active_tts_message_index = None;
+                self.active_stt_message_index = None;
                 self.active_intent_trace_message_index = None;
                 self.network_rtt_ms = None;
                 self.last_audio_event_ui_refresh_at = None;
@@ -418,6 +423,7 @@ impl MeetingHostShell {
                 self.downlink_audio_bytes = 0;
                 self.pending_detect_requests.clear();
                 self.active_tts_message_index = None;
+                self.active_stt_message_index = None;
                 self.active_intent_trace_message_index = None;
                 self.last_audio_event_ui_refresh_at = None;
                 self.aec_stream_delay_ms = None;
@@ -461,6 +467,7 @@ impl MeetingHostShell {
             self.gateway_status = GatewayStatus::Idle;
             self.pending_detect_requests.clear();
             self.active_tts_message_index = None;
+            self.active_stt_message_index = None;
             self.active_intent_trace_message_index = None;
             self.last_audio_event_ui_refresh_at = None;
             self.notify_views(cx);
@@ -499,6 +506,7 @@ impl MeetingHostShell {
                 self.downlink_audio_bytes = 0;
                 self.pending_detect_requests.clear();
                 self.active_tts_message_index = None;
+                self.active_stt_message_index = None;
                 self.active_intent_trace_message_index = None;
                 self.last_audio_event_ui_refresh_at = None;
             }
@@ -548,6 +556,7 @@ impl MeetingHostShell {
                 self.downlink_audio_bytes = 0;
                 self.pending_detect_requests.clear();
                 self.active_tts_message_index = None;
+                self.active_stt_message_index = None;
                 self.active_intent_trace_message_index = None;
                 self.last_audio_event_ui_refresh_at = None;
                 self.aec_stream_delay_ms = None;

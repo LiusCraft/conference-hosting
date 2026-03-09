@@ -20,6 +20,7 @@ impl MeetingHostShell {
 
         self.push_chat(ChatRole::User, "You", text.clone());
         self.active_tts_message_index = None;
+        self.active_stt_message_index = None;
         self.active_intent_trace_message_index = None;
         self.send_gateway_command(GatewayCommand::DetectText(text), cx);
 
