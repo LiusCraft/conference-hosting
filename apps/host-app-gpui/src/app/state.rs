@@ -1,6 +1,8 @@
 use gpui::SharedString;
 use host_core::InboundTextMessage;
 
+use crate::mcp::McpServerProbeStatus;
+
 pub(crate) const WINDOW_WIDTH: f32 = 1200.0;
 pub(crate) const WINDOW_HEIGHT: f32 = 760.0;
 pub(crate) const APP_TITLE: &str = "AI Meeting Host v0.1.0-alpha";
@@ -51,6 +53,7 @@ pub(crate) enum GatewayCommand {
     StopUplinkStream,
     SetSpeakerOutputEnabled(bool),
     SetAecEnabled(bool),
+    RefreshMcpTools,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -78,6 +81,7 @@ pub(crate) enum UiGatewayEvent {
     NetworkRttUpdated(u32),
     AecStateChanged(bool),
     AecStats(AecStatsSnapshot),
+    McpProbeStatuses(Vec<McpServerProbeStatus>),
 }
 
 #[derive(Debug, Clone)]

@@ -3,6 +3,7 @@ mod assets;
 mod components;
 mod features;
 mod gateway_runtime;
+mod mcp;
 mod widgets;
 
 use app::shell::MeetingHostShell;

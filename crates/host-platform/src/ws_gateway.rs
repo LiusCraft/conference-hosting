@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use host_core::{ClientTextMessage, HelloMessage, InboundTextMessage};
+use host_core::{
+    ClientTextMessage, HelloMessage, InboundTextMessage, JsonRpcMessage, McpEnvelopeMessage,
+};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
@@ -23,6 +25,7 @@ pub struct WsGatewayConfig {
     pub device_mac: String,
     pub client_id: String,
     pub token: String,
+    pub enable_mcp: bool,
     pub hello_timeout: Duration,
 }
 
@@ -42,6 +45,7 @@ impl WsGatewayConfig {
             device_mac: device_mac.into(),
             client_id: client_id.into(),
             token: token.into(),
+            enable_mcp: true,
             hello_timeout: Duration::from_secs(5),
         }
     }
@@ -51,7 +55,12 @@ impl WsGatewayConfig {
         self
     }
 
-    fn hello_message(&self) -> ClientTextMessage {
+    pub fn with_mcp_feature(mut self, enabled: bool) -> Self {
+        self.enable_mcp = enabled;
+        self
+    }
+
+    pub fn hello_message(&self) -> ClientTextMessage {
         ClientTextMessage::hello(
             HelloMessage::new(
                 self.device_id.clone(),
@@ -59,7 +68,8 @@ impl WsGatewayConfig {
                 self.device_mac.clone(),
                 self.token.clone(),
             )
-            .with_intent_trace_notify(true),
+            .with_intent_trace_notify(true)
+            .with_mcp(self.enable_mcp),
         )
     }
 
@@ -246,6 +256,17 @@ impl WsGatewayClient {
             .await
     }
 
+    pub async fn send_mcp_jsonrpc(
+        &self,
+        session_id: impl Into<String>,
+        payload: JsonRpcMessage,
+    ) -> Result<(), WsGatewayError> {
+        self.send_text(ClientTextMessage::mcp(McpEnvelopeMessage::new(
+            session_id, payload,
+        )))
+        .await
+    }
+
     pub async fn send_audio_frame(&self, frame: Vec<u8>) -> Result<(), WsGatewayError> {
         let mut sink = self.sink.lock().await;
         sink.send(Message::Binary(frame.into())).await?;
@@ -413,6 +434,7 @@ mod tests {
             assert_eq!(hello["device_id"], "dev-001");
             assert_eq!(hello["device_mac"], "AA:BB:CC:DD:EE:FF");
             assert_eq!(hello["features"]["notify"]["intent_trace"], true);
+            assert_eq!(hello["features"]["mcp"], true);
 
             socket
                 .send(Message::Text(
@@ -685,5 +707,22 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn hello_message_can_disable_mcp_feature_flag() {
+        let config = WsGatewayConfig::new(
+            "ws://127.0.0.1:8000/xiaozhi/v1/",
+            "dev-001",
+            "Host Desktop",
+            "AA:BB:CC:DD:EE:FF",
+            "host-client",
+            "token-demo",
+        )
+        .with_mcp_feature(false);
+
+        let hello = serde_json::to_value(config.hello_message()).expect("serialize hello message");
+        assert_eq!(hello["type"], "hello");
+        assert_eq!(hello["features"]["mcp"], false);
     }
 }

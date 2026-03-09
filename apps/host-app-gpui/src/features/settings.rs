@@ -3,6 +3,9 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use host_core::{AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE_HZ};
 
+use crate::app::persistence::{
+    save_persisted_app_settings, PersistedAppSettings, PersistedUiSettings, PersistedWsSettings,
+};
 use crate::app::shell::{ui_button_icon, ui_icon, ButtonIconTone, MeetingHostShell};
 use crate::components::icon::IconName;
 
@@ -46,7 +49,49 @@ impl MeetingHostShell {
         self.apply_show_ai_emotion_messages(self.show_ai_emotion_messages_draft);
         self.aec_enabled_draft = self.aec_enabled;
         self.show_ai_emotion_messages_draft = self.show_ai_emotion_messages;
+        let mcp_changed = self.mcp_servers != self.mcp_servers_draft;
+        self.mcp_servers = self.mcp_servers_draft.clone();
         self.write_settings_input_values(window, cx);
+
+        let persisted_settings = PersistedAppSettings {
+            ws: PersistedWsSettings {
+                server_url: self.ws_url.clone(),
+                device_id: self.device_id.clone(),
+                client_id: self.client_id.clone(),
+                auth_token: self.auth_token.clone(),
+            },
+            ui: PersistedUiSettings {
+                aec_enabled: Some(self.aec_enabled),
+                show_ai_emotion_messages: Some(self.show_ai_emotion_messages),
+            },
+            mcp_servers: self.mcp_servers.clone(),
+        };
+        if let Err(error) = save_persisted_app_settings(&persisted_settings) {
+            self.push_chat(
+                crate::app::state::ChatRole::Error,
+                "Error",
+                format!("保存本地设置失败: {error}"),
+            );
+        } else {
+            self.push_chat(
+                crate::app::state::ChatRole::System,
+                "System",
+                "本地设置已保存（包含 MCP Servers）",
+            );
+        }
+
+        if mcp_changed
+            && matches!(
+                self.connection_state,
+                crate::app::state::ConnectionState::Connected
+            )
+        {
+            self.push_chat(
+                crate::app::state::ChatRole::System,
+                "System",
+                "MCP 配置已变更，请断开并重连以加载新配置",
+            );
+        }
 
         self.show_settings_panel = false;
         self.notify_views(cx);
@@ -59,6 +104,7 @@ impl MeetingHostShell {
         self.client_id_draft = self.client_id.clone();
         self.aec_enabled_draft = self.aec_enabled;
         self.show_ai_emotion_messages_draft = self.show_ai_emotion_messages;
+        self.reset_mcp_settings_drafts(window, cx);
         self.write_settings_input_values(window, cx);
     }
 
@@ -226,6 +272,9 @@ impl MeetingHostShell {
                     .track_scroll(&self.settings_scroll)
                     .overflow_y_scroll()
                     .scrollbar_width(gpui::px(10.0))
+                    .child(
+                        self.render_mcp_servers_section(window, cx),
+                    )
                     .child(
                         div()
                             .flex()

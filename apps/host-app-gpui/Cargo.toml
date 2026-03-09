@@ -17,6 +17,8 @@ opus.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+url.workspace = true
+rmcp.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1.12"

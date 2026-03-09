@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -10,6 +10,7 @@ use host_core::GatewayStatus;
 use tokio::sync::mpsc;
 
 use crate::app::config::{build_gateway_config, env_or_default};
+use crate::app::persistence::load_persisted_app_settings;
 use crate::app::state::{
     ChatMessage, ChatRole, ConnectionState, GatewayCommand, UiGatewayEvent, APP_TITLE,
     DEFAULT_CLIENT_ID, DEFAULT_DEVICE_MAC, DEFAULT_TOKEN, DEFAULT_WS_URL,
@@ -22,6 +23,10 @@ use crate::features::audio::{
 use crate::features::chat::{load_history_chat_messages, wall_clock_label};
 use crate::gateway_runtime::{
     spawn_gateway_worker, AudioDeviceState, COMMAND_CHANNEL_CAPACITY, EVENT_CHANNEL_CAPACITY,
+};
+use crate::mcp::{
+    McpServerConfig, McpServerProbeStatus, McpTransportKind, DEFAULT_MCP_CONNECT_TIMEOUT_MS,
+    DEFAULT_MCP_REQUEST_TIMEOUT_MS,
 };
 
 const AUDIO_EVENT_UI_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
@@ -80,6 +85,25 @@ pub(crate) struct MeetingHostShell {
     pub(crate) aec_erle_db: Option<f32>,
     pub(crate) show_ai_emotion_messages: bool,
     pub(crate) show_ai_emotion_messages_draft: bool,
+    pub(crate) mcp_servers: Vec<McpServerConfig>,
+    pub(crate) mcp_servers_draft: Vec<McpServerConfig>,
+    pub(crate) mcp_server_statuses: Vec<McpServerProbeStatus>,
+    pub(crate) mcp_tools_expanded_servers: HashSet<String>,
+    pub(crate) mcp_probe_in_progress: bool,
+    pub(crate) show_mcp_editor: bool,
+    pub(crate) mcp_editor_server_id: Option<String>,
+    pub(crate) mcp_editor_enabled: bool,
+    pub(crate) mcp_editor_transport: McpTransportKind,
+    pub(crate) mcp_form_error: Option<String>,
+    pub(crate) mcp_form_notice: Option<String>,
+    pub(crate) mcp_alias_input_state: Entity<InputState>,
+    pub(crate) mcp_endpoint_input_state: Entity<InputState>,
+    pub(crate) mcp_args_input_state: Entity<InputState>,
+    pub(crate) mcp_env_headers_input_state: Entity<InputState>,
+    pub(crate) mcp_cwd_input_state: Entity<InputState>,
+    pub(crate) mcp_auth_input_state: Entity<InputState>,
+    pub(crate) mcp_request_timeout_input_state: Entity<InputState>,
+    pub(crate) mcp_connect_timeout_input_state: Entity<InputState>,
     pub(crate) chat_messages: Vec<ChatMessage>,
     pub(crate) pending_detect_requests: VecDeque<Instant>,
     pub(crate) active_tts_message_index: Option<usize>,
@@ -97,12 +121,33 @@ impl MeetingHostShell {
         cx: &mut Context<Self>,
         audio_state: AudioDeviceState,
     ) -> Self {
-        let initial_ws_url = env_or_default("HOST_WS_URL", DEFAULT_WS_URL);
+        let persisted_settings = load_persisted_app_settings();
+        let initial_ws_url = prefer_non_empty(
+            &persisted_settings.ws.server_url,
+            env_or_default("HOST_WS_URL", DEFAULT_WS_URL),
+        );
         let initial_device_mac = env_or_default("HOST_DEVICE_MAC", DEFAULT_DEVICE_MAC);
-        let initial_device_id = env_or_default("HOST_DEVICE_ID", &initial_device_mac);
-        let initial_client_id = env_or_default("HOST_CLIENT_ID", DEFAULT_CLIENT_ID);
-        let initial_auth_token = env_or_default("HOST_TOKEN", DEFAULT_TOKEN);
-        let initial_aec_enabled = env_bool_or_default("HOST_ENABLE_AEC", true);
+        let initial_device_id = prefer_non_empty(
+            &persisted_settings.ws.device_id,
+            env_or_default("HOST_DEVICE_ID", &initial_device_mac),
+        );
+        let initial_client_id = prefer_non_empty(
+            &persisted_settings.ws.client_id,
+            env_or_default("HOST_CLIENT_ID", DEFAULT_CLIENT_ID),
+        );
+        let initial_auth_token = prefer_non_empty(
+            &persisted_settings.ws.auth_token,
+            env_or_default("HOST_TOKEN", DEFAULT_TOKEN),
+        );
+        let initial_aec_enabled = persisted_settings
+            .ui
+            .aec_enabled
+            .unwrap_or_else(|| env_bool_or_default("HOST_ENABLE_AEC", true));
+        let initial_show_ai_emotion_messages = persisted_settings
+            .ui
+            .show_ai_emotion_messages
+            .unwrap_or(false);
+        let initial_mcp_servers = persisted_settings.mcp_servers;
         let chat_input_state = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("输入指令 (例: listen detect)")
@@ -127,6 +172,46 @@ impl MeetingHostShell {
             InputState::new(window, cx)
                 .placeholder("client-id")
                 .default_value(initial_client_id.clone())
+        });
+        let mcp_alias_input_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("calendar")
+                .clean_on_escape()
+        });
+        let mcp_endpoint_input_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("stdio command / https://mcp.example.com/sse")
+                .clean_on_escape()
+        });
+        let mcp_args_input_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("args 或 headers, 例如: --stdio, Authorization=Bearer token")
+                .clean_on_escape()
+        });
+        let mcp_env_headers_input_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("env 或 headers, 例如: LANG=zh_CN.UTF-8")
+                .clean_on_escape()
+        });
+        let mcp_cwd_input_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("cwd (stdio 可选)")
+                .clean_on_escape()
+        });
+        let mcp_auth_input_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("stream auth (可选，自动映射到 header)")
+                .clean_on_escape()
+        });
+        let mcp_request_timeout_input_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("request_timeout_ms")
+                .default_value(DEFAULT_MCP_REQUEST_TIMEOUT_MS.to_string())
+        });
+        let mcp_connect_timeout_input_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("connect_timeout_ms")
+                .default_value(DEFAULT_MCP_CONNECT_TIMEOUT_MS.to_string())
         });
         let input_select_items =
             build_input_select_items(&audio_state.input_devices, &audio_state.output_devices);
@@ -229,6 +314,14 @@ impl MeetingHostShell {
             auth_token_input_state,
             device_id_input_state,
             client_id_input_state,
+            mcp_alias_input_state,
+            mcp_endpoint_input_state,
+            mcp_args_input_state,
+            mcp_env_headers_input_state,
+            mcp_cwd_input_state,
+            mcp_auth_input_state,
+            mcp_request_timeout_input_state,
+            mcp_connect_timeout_input_state,
             input_select_state,
             output_select_state,
             chat_input_focused: false,
@@ -261,8 +354,19 @@ impl MeetingHostShell {
             aec_processor_delay_ms: None,
             aec_erl_db: None,
             aec_erle_db: None,
-            show_ai_emotion_messages: false,
-            show_ai_emotion_messages_draft: false,
+            show_ai_emotion_messages: initial_show_ai_emotion_messages,
+            show_ai_emotion_messages_draft: initial_show_ai_emotion_messages,
+            mcp_servers: initial_mcp_servers.clone(),
+            mcp_servers_draft: initial_mcp_servers,
+            mcp_server_statuses: Vec::new(),
+            mcp_tools_expanded_servers: HashSet::new(),
+            mcp_probe_in_progress: false,
+            show_mcp_editor: false,
+            mcp_editor_server_id: None,
+            mcp_editor_enabled: true,
+            mcp_editor_transport: McpTransportKind::Stdio,
+            mcp_form_error: None,
+            mcp_form_notice: None,
             chat_messages: load_history_chat_messages(),
             pending_detect_requests: VecDeque::new(),
             active_tts_message_index: None,
@@ -317,8 +421,10 @@ impl MeetingHostShell {
             Some(self.device_id.as_str()),
             Some(self.client_id.as_str()),
             Some(self.auth_token.as_str()),
+            true,
         );
         let audio_routing = self.build_audio_routing_config();
+        let mcp_servers = self.mcp_servers.clone();
         self.ws_url = config.server_url.clone();
         self.device_id = config.device_id.clone();
         self.client_id = config.client_id.clone();
@@ -355,7 +461,7 @@ impl MeetingHostShell {
         let (command_tx, command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
         let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
 
-        spawn_gateway_worker(config, audio_routing, command_rx, event_tx);
+        spawn_gateway_worker(config, audio_routing, mcp_servers, command_rx, event_tx);
 
         self.ws_command_tx = Some(command_tx);
 
@@ -635,6 +741,15 @@ impl MeetingHostShell {
                 self.aec_erl_db = Some(stats.erl_db);
                 self.aec_erle_db = Some(stats.erle_db);
                 self.should_refresh_audio_event_ui(Instant::now())
+            }
+            UiGatewayEvent::McpProbeStatuses(statuses) => {
+                self.mcp_server_statuses = statuses;
+                self.mcp_tools_expanded_servers.retain(|server_id| {
+                    self.mcp_server_statuses
+                        .iter()
+                        .any(|status| status.server_id == *server_id && !status.tools.is_empty())
+                });
+                true
             }
         };
 
@@ -1036,6 +1151,15 @@ fn env_bool_or_default(key: &str, default: bool) -> bool {
             _ => None,
         })
         .unwrap_or(default)
+}
+
+fn prefer_non_empty(preferred: &str, fallback: String) -> String {
+    let preferred = preferred.trim();
+    if preferred.is_empty() {
+        fallback
+    } else {
+        preferred.to_string()
+    }
 }
 
 #[cfg(test)]

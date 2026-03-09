@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use aec3::voip::VoipAec3;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
-use host_core::{ClientTextMessage, HelloMessage, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE_HZ};
+use host_core::{ClientTextMessage, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE_HZ};
 use host_platform::{WsGatewayClient, WsGatewayConfig, WsGatewayEvent};
 use opus::{
     Application as OpusApplication, Bitrate as OpusBitrate, Channels as OpusChannels,
@@ -20,6 +20,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::time;
 
 use crate::app::state::{AecStatsSnapshot, AudioRoutingConfig, GatewayCommand, UiGatewayEvent};
+use crate::mcp::{McpBridge, McpProbeState, McpServerConfig};
 
 pub const COMMAND_CHANNEL_CAPACITY: usize = 64;
 pub const EVENT_CHANNEL_CAPACITY: usize = 512;
@@ -99,6 +100,7 @@ pub fn load_audio_device_state() -> AudioDeviceState {
 pub fn spawn_gateway_worker(
     config: WsGatewayConfig,
     audio_routing: AudioRoutingConfig,
+    mcp_servers: Vec<McpServerConfig>,
     mut command_rx: mpsc::Receiver<GatewayCommand>,
     event_tx: mpsc::Sender<UiGatewayEvent>,
 ) {
@@ -119,15 +121,7 @@ pub fn spawn_gateway_worker(
             let _ = event_tx
                 .send(UiGatewayEvent::OutgoingText {
                     kind: "hello".to_string(),
-                    payload: to_redacted_pretty_json(&ClientTextMessage::hello(
-                        HelloMessage::new(
-                            config.device_id.clone(),
-                            config.device_name.clone(),
-                            config.device_mac.clone(),
-                            config.token.clone(),
-                        )
-                        .with_intent_trace_notify(true),
-                    )),
+                    payload: to_redacted_pretty_json(&config.hello_message()),
                 })
                 .await;
 
@@ -156,6 +150,34 @@ pub fn spawn_gateway_worker(
                     audio_routing.output_label()
                 )))
                 .await;
+
+            let mut mcp_bridge = McpBridge::new(mcp_servers);
+            mcp_bridge.refresh_tools().await;
+            let initial_mcp_statuses = mcp_bridge.probe_statuses().to_vec();
+            let _ = event_tx
+                .send(UiGatewayEvent::McpProbeStatuses(initial_mcp_statuses.clone()))
+                .await;
+            let _ = event_tx
+                .send(UiGatewayEvent::SystemNotice(format!(
+                    "MCP bridge ready: {} tools available",
+                    mcp_bridge.tool_count()
+                )))
+                .await;
+
+            let failed_servers = initial_mcp_statuses
+                .iter()
+                .filter(|status| status.state == McpProbeState::Failed)
+                .map(|status| format!("{} ({})", status.alias, status.detail))
+                .collect::<Vec<_>>();
+            if !failed_servers.is_empty() {
+                eprintln!("[mcp][refresh] {}", failed_servers.join("; "));
+                let _ = event_tx
+                    .send(UiGatewayEvent::Error(format!(
+                        "MCP 刷新失败: {}",
+                        failed_servers.join("; ")
+                    )))
+                    .await;
+            }
 
             let mut aec_enabled = if env_optional(HOST_ENABLE_AEC_ENV).is_some() {
                 env_bool_or_default(HOST_ENABLE_AEC_ENV, true)
@@ -219,6 +241,36 @@ pub fn spawn_gateway_worker(
                         let Some(command) = maybe_command else {
                             break;
                         };
+
+                        if let GatewayCommand::RefreshMcpTools = command {
+                            mcp_bridge.refresh_tools().await;
+                            let refreshed_statuses = mcp_bridge.probe_statuses().to_vec();
+                            let _ = event_tx
+                                .send(UiGatewayEvent::McpProbeStatuses(refreshed_statuses.clone()))
+                                .await;
+                            let _ = event_tx
+                                .send(UiGatewayEvent::SystemNotice(format!(
+                                    "MCP tools refreshed: {} tools available",
+                                    mcp_bridge.tool_count()
+                                )))
+                                .await;
+
+                            let failed_servers = refreshed_statuses
+                                .iter()
+                                .filter(|status| status.state == McpProbeState::Failed)
+                                .map(|status| format!("{} ({})", status.alias, status.detail))
+                                .collect::<Vec<_>>();
+                            if !failed_servers.is_empty() {
+                                eprintln!("[mcp][refresh] {}", failed_servers.join("; "));
+                                let _ = event_tx
+                                    .send(UiGatewayEvent::Error(format!(
+                                        "MCP 刷新失败: {}",
+                                        failed_servers.join("; ")
+                                    )))
+                                    .await;
+                            }
+                            continue;
+                        }
 
                         if let GatewayCommand::SetSpeakerOutputEnabled(enabled) = command {
                             if speaker_output_enabled != enabled {
@@ -432,6 +484,50 @@ pub fn spawn_gateway_worker(
 
                         match event {
                             WsGatewayEvent::Text(message) => {
+                                if let Some(response) =
+                                    mcp_bridge
+                                        .handle_inbound_message(&message, client.session_id())
+                                        .await
+                                {
+                                    if let Err(error) = client
+                                        .send_mcp_jsonrpc(
+                                            response.session_id.clone(),
+                                            response.payload.clone(),
+                                        )
+                                        .await
+                                    {
+                                        let _ = event_tx
+                                            .send(UiGatewayEvent::Error(format!(
+                                                "Failed to send MCP response: {error}"
+                                            )))
+                                            .await;
+                                        break;
+                                    }
+
+                                    let _ = event_tx
+                                        .send(UiGatewayEvent::OutgoingText {
+                                            kind: "mcp".to_string(),
+                                            payload: to_redacted_pretty_json(
+                                                &ClientTextMessage::mcp(response),
+                                            ),
+                                        })
+                                        .await;
+
+                                    if message
+                                        .payload
+                                        .get("payload")
+                                        .and_then(|value| value.get("method"))
+                                        .and_then(Value::as_str)
+                                        == Some("tools/list")
+                                    {
+                                        let _ = event_tx
+                                            .send(UiGatewayEvent::McpProbeStatuses(
+                                                mcp_bridge.probe_statuses().to_vec(),
+                                            ))
+                                            .await;
+                                    }
+                                }
+
                                 let _ = event_tx.send(UiGatewayEvent::IncomingText(message)).await;
                             }
                             WsGatewayEvent::DownlinkAudio(data) => {
@@ -754,6 +850,7 @@ async fn handle_gateway_command(
         }
         GatewayCommand::SetSpeakerOutputEnabled(_) => true,
         GatewayCommand::SetAecEnabled(_) => true,
+        GatewayCommand::RefreshMcpTools => true,
     }
 }
 

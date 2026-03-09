@@ -2,9 +2,9 @@ pub mod protocol;
 
 pub use protocol::{
     ClientTextMessage, HelloFeatures, HelloMessage, HelloNotifyFeatures, InboundTextMessage,
-    ListenMessage, ListenMode, ListenState, AUDIO_CHANNELS_MONO, AUDIO_FRAME_BYTES_PCM16_MONO,
-    AUDIO_FRAME_DURATION_MS, AUDIO_FRAME_SAMPLES, AUDIO_PCM16_BYTES_PER_SAMPLE,
-    AUDIO_SAMPLE_RATE_HZ,
+    JsonRpcError, JsonRpcMessage, ListenMessage, ListenMode, ListenState, McpEnvelopeMessage,
+    AUDIO_CHANNELS_MONO, AUDIO_FRAME_BYTES_PCM16_MONO, AUDIO_FRAME_DURATION_MS,
+    AUDIO_FRAME_SAMPLES, AUDIO_PCM16_BYTES_PER_SAMPLE, AUDIO_SAMPLE_RATE_HZ,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

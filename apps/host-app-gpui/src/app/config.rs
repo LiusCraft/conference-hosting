@@ -9,6 +9,7 @@ pub(crate) fn build_gateway_config(
     device_id_override: Option<&str>,
     client_id_override: Option<&str>,
     token_override: Option<&str>,
+    mcp_enabled: bool,
 ) -> WsGatewayConfig {
     let device_mac = env_or_default("HOST_DEVICE_MAC", DEFAULT_DEVICE_MAC);
     let device_id = resolve_override_or_env(device_id_override, "HOST_DEVICE_ID", &device_mac);
@@ -25,6 +26,7 @@ pub(crate) fn build_gateway_config(
         client_id,
         token,
     )
+    .with_mcp_feature(mcp_enabled)
 }
 
 fn resolve_override_or_env(override_value: Option<&str>, env_key: &str, fallback: &str) -> String {
