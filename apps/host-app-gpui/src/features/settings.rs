@@ -1,7 +1,7 @@
 use gpui::{div, prelude::*, px, rgb, Context, FontWeight, SharedString, Window};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
-use host_core::{AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE_HZ};
+use host_core::{ListenMode, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE_HZ};
 
 use crate::app::persistence::{
     save_persisted_app_settings, PersistedAppSettings, PersistedUiSettings, PersistedWsSettings,
@@ -47,8 +47,10 @@ impl MeetingHostShell {
         self.client_id_draft = self.client_id.clone();
         self.apply_aec_enabled(self.aec_enabled_draft);
         self.apply_show_ai_emotion_messages(self.show_ai_emotion_messages_draft);
+        self.apply_listen_mode(self.listen_mode_draft);
         self.aec_enabled_draft = self.aec_enabled;
         self.show_ai_emotion_messages_draft = self.show_ai_emotion_messages;
+        self.listen_mode_draft = self.listen_mode;
         let mcp_changed = self.mcp_servers != self.mcp_servers_draft;
         self.mcp_servers = self.mcp_servers_draft.clone();
         self.write_settings_input_values(window, cx);
@@ -63,6 +65,7 @@ impl MeetingHostShell {
             ui: PersistedUiSettings {
                 aec_enabled: Some(self.aec_enabled),
                 show_ai_emotion_messages: Some(self.show_ai_emotion_messages),
+                listen_mode: Some(self.listen_mode),
             },
             mcp_servers: self.mcp_servers.clone(),
         };
@@ -104,6 +107,7 @@ impl MeetingHostShell {
         self.client_id_draft = self.client_id.clone();
         self.aec_enabled_draft = self.aec_enabled;
         self.show_ai_emotion_messages_draft = self.show_ai_emotion_messages;
+        self.listen_mode_draft = self.listen_mode;
         self.reset_mcp_settings_drafts(window, cx);
         self.write_settings_input_values(window, cx);
     }
@@ -135,6 +139,15 @@ impl MeetingHostShell {
 
     pub(crate) fn toggle_aec_enabled(&mut self, cx: &mut Context<Self>) {
         self.aec_enabled_draft = !self.aec_enabled_draft;
+        self.notify_views(cx);
+    }
+
+    pub(crate) fn set_listen_mode_draft(&mut self, mode: ListenMode, cx: &mut Context<Self>) {
+        if self.listen_mode_draft == mode {
+            return;
+        }
+
+        self.listen_mode_draft = mode;
         self.notify_views(cx);
     }
 
@@ -195,6 +208,48 @@ impl MeetingHostShell {
         }
     }
 
+    fn apply_listen_mode(&mut self, mode: ListenMode) {
+        if self.listen_mode == mode {
+            return;
+        }
+
+        self.listen_mode = mode;
+        let connected = matches!(
+            self.connection_state,
+            crate::app::state::ConnectionState::Connected
+        );
+
+        if connected {
+            if let Some(command_tx) = self.ws_command_tx.as_ref() {
+                if command_tx
+                    .try_send(crate::app::state::GatewayCommand::SetListenMode(
+                        self.listen_mode,
+                    ))
+                    .is_err()
+                {
+                    self.push_chat(
+                        crate::app::state::ChatRole::Error,
+                        "Error",
+                        "Failed to sync listen mode to gateway worker",
+                    );
+                }
+            }
+        }
+
+        self.push_chat(
+            crate::app::state::ChatRole::System,
+            "System",
+            format!("Listen mode set to {}", listen_mode_code(self.listen_mode)),
+        );
+        if !connected {
+            self.push_chat(
+                crate::app::state::ChatRole::System,
+                "System",
+                "Listen mode will apply when the next gateway connection starts",
+            );
+        }
+    }
+
     pub(crate) fn render_settings_panel(
         &self,
         window: &mut Window,
@@ -213,6 +268,9 @@ impl MeetingHostShell {
         let save_view = cx.entity().downgrade();
         let toggle_ai_view = cx.entity().downgrade();
         let toggle_aec_view = cx.entity().downgrade();
+        let set_manual_mode_view = cx.entity().downgrade();
+        let set_auto_mode_view = cx.entity().downgrade();
+        let set_realtime_mode_view = cx.entity().downgrade();
 
         div()
             .w(px(560.0))
@@ -483,6 +541,138 @@ impl MeetingHostShell {
                                     .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(0xdce4f3))
+                                    .child(ui_icon(IconName::Mic, 13.0, 0x16d9c0))
+                                    .child("语音监听模式"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(rgb(0x1d283a))
+                                    .bg(rgb(0x101726))
+                                    .px_3()
+                                    .py_3()
+                                    .gap_3()
+                                    .child(setting_row(
+                                        "当前模式",
+                                        format!(
+                                            "{} ({})",
+                                            listen_mode_title(self.listen_mode_draft),
+                                            listen_mode_code(self.listen_mode_draft)
+                                        ),
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                Button::new("listen-mode-manual")
+                                                    .h_8()
+                                                    .px_3()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .when(
+                                                        self.listen_mode_draft
+                                                            == ListenMode::Manual,
+                                                        |this| this.success().child("manual"),
+                                                    )
+                                                    .when(
+                                                        self.listen_mode_draft
+                                                            != ListenMode::Manual,
+                                                        |this| this.outline().child("manual"),
+                                                    )
+                                                    .on_click(move |_, _, cx| {
+                                                        let _ = set_manual_mode_view.update(
+                                                            cx,
+                                                            |view, cx| {
+                                                                view.set_listen_mode_draft(
+                                                                    ListenMode::Manual,
+                                                                    cx,
+                                                                )
+                                                            },
+                                                        );
+                                                    }),
+                                            )
+                                            .child(
+                                                Button::new("listen-mode-auto")
+                                                    .h_8()
+                                                    .px_3()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .when(
+                                                        self.listen_mode_draft == ListenMode::Auto,
+                                                        |this| this.success().child("auto"),
+                                                    )
+                                                    .when(
+                                                        self.listen_mode_draft != ListenMode::Auto,
+                                                        |this| this.outline().child("auto"),
+                                                    )
+                                                    .on_click(move |_, _, cx| {
+                                                        let _ = set_auto_mode_view.update(
+                                                            cx,
+                                                            |view, cx| {
+                                                                view.set_listen_mode_draft(
+                                                                    ListenMode::Auto,
+                                                                    cx,
+                                                                )
+                                                            },
+                                                        );
+                                                    }),
+                                            )
+                                            .child(
+                                                Button::new("listen-mode-realtime")
+                                                    .h_8()
+                                                    .px_3()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .when(
+                                                        self.listen_mode_draft
+                                                            == ListenMode::Realtime,
+                                                        |this| this.success().child("realtime"),
+                                                    )
+                                                    .when(
+                                                        self.listen_mode_draft
+                                                            != ListenMode::Realtime,
+                                                        |this| this.outline().child("realtime"),
+                                                    )
+                                                    .on_click(move |_, _, cx| {
+                                                        let _ = set_realtime_mode_view.update(
+                                                            cx,
+                                                            |view, cx| {
+                                                                view.set_listen_mode_draft(
+                                                                    ListenMode::Realtime,
+                                                                    cx,
+                                                                )
+                                                            },
+                                                        );
+                                                    }),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(0x7d8aa0))
+                                            .whitespace_normal()
+                                            .child(listen_mode_description(self.listen_mode_draft)),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0xdce4f3))
                                     .child(ui_icon(IconName::Globe, 13.0, 0x16d9c0))
                                     .child("平台适配"),
                             )
@@ -703,6 +893,30 @@ fn option_db(value: Option<f32>) -> String {
     value
         .map(|value| format!("{value:.1}"))
         .unwrap_or_else(|| "-".to_string())
+}
+
+fn listen_mode_code(mode: ListenMode) -> &'static str {
+    match mode {
+        ListenMode::Manual => "manual",
+        ListenMode::Auto => "auto",
+        ListenMode::Realtime => "realtime",
+    }
+}
+
+fn listen_mode_title(mode: ListenMode) -> &'static str {
+    match mode {
+        ListenMode::Manual => "手动触发",
+        ListenMode::Auto => "唤醒词触发",
+        ListenMode::Realtime => "自由对话",
+    }
+}
+
+fn listen_mode_description(mode: ListenMode) -> &'static str {
+    match mode {
+        ListenMode::Manual => "manual: 手动触发模式，设备端可按键控制开始/停止监听。",
+        ListenMode::Auto => "auto: 唤醒词触发模式，可通过唤醒词触发并打断 AI 播放。",
+        ListenMode::Realtime => "realtime: 自由对话全双工，检测到语音时可实时打断 AI 说话。",
+    }
 }
 
 impl MeetingHostShell {

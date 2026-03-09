@@ -6,7 +6,7 @@ use gpui::{
     SharedString, Stateful, Window, WindowControlArea,
 };
 use gpui_component::input::{InputEvent, InputState};
-use host_core::GatewayStatus;
+use host_core::{GatewayStatus, ListenMode};
 use tokio::sync::mpsc;
 
 use crate::app::config::{build_gateway_config, env_or_default};
@@ -83,6 +83,8 @@ pub(crate) struct MeetingHostShell {
     pub(crate) aec_processor_delay_ms: Option<i32>,
     pub(crate) aec_erl_db: Option<f32>,
     pub(crate) aec_erle_db: Option<f32>,
+    pub(crate) listen_mode: ListenMode,
+    pub(crate) listen_mode_draft: ListenMode,
     pub(crate) show_ai_emotion_messages: bool,
     pub(crate) show_ai_emotion_messages_draft: bool,
     pub(crate) mcp_servers: Vec<McpServerConfig>,
@@ -110,6 +112,7 @@ pub(crate) struct MeetingHostShell {
     pub(crate) active_stt_message_index: Option<usize>,
     pub(crate) active_intent_trace_message_index: Option<usize>,
     pub(crate) follow_latest_chat_messages: bool,
+    pub(crate) render_full_chat_history: bool,
     pub(crate) pending_chat_messages: usize,
     pub(crate) has_pending_chat_messages: bool,
     pub(crate) last_audio_event_ui_refresh_at: Option<Instant>,
@@ -147,6 +150,10 @@ impl MeetingHostShell {
             .ui
             .show_ai_emotion_messages
             .unwrap_or(false);
+        let initial_listen_mode = persisted_settings
+            .ui
+            .listen_mode
+            .unwrap_or(ListenMode::Manual);
         let initial_mcp_servers = persisted_settings.mcp_servers;
         let chat_input_state = cx.new(|cx| {
             InputState::new(window, cx)
@@ -295,7 +302,7 @@ impl MeetingHostShell {
         )
         .detach();
 
-        Self {
+        let mut shell = Self {
             connection_state: ConnectionState::Idle,
             gateway_status: GatewayStatus::Idle,
             ws_url: initial_ws_url.clone(),
@@ -354,6 +361,8 @@ impl MeetingHostShell {
             aec_processor_delay_ms: None,
             aec_erl_db: None,
             aec_erle_db: None,
+            listen_mode: initial_listen_mode,
+            listen_mode_draft: initial_listen_mode,
             show_ai_emotion_messages: initial_show_ai_emotion_messages,
             show_ai_emotion_messages_draft: initial_show_ai_emotion_messages,
             mcp_servers: initial_mcp_servers.clone(),
@@ -373,10 +382,14 @@ impl MeetingHostShell {
             active_stt_message_index: None,
             active_intent_trace_message_index: None,
             follow_latest_chat_messages: true,
+            render_full_chat_history: false,
             pending_chat_messages: 0,
             has_pending_chat_messages: false,
             last_audio_event_ui_refresh_at: None,
-        }
+        };
+
+        shell.warmup_mcp_tools_cache_on_startup(cx);
+        shell
     }
 
     pub(crate) fn prepare_for_window_close(&mut self) {
@@ -396,6 +409,7 @@ impl MeetingHostShell {
         self.active_tts_message_index = None;
         self.active_stt_message_index = None;
         self.active_intent_trace_message_index = None;
+        self.render_full_chat_history = false;
         self.network_rtt_ms = None;
         self.last_audio_event_ui_refresh_at = None;
         self.aec_stream_delay_ms = None;
@@ -442,6 +456,7 @@ impl MeetingHostShell {
         self.active_tts_message_index = None;
         self.active_stt_message_index = None;
         self.active_intent_trace_message_index = None;
+        self.render_full_chat_history = false;
         self.last_audio_event_ui_refresh_at = None;
         self.push_chat(
             ChatRole::System,
@@ -461,7 +476,14 @@ impl MeetingHostShell {
         let (command_tx, command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
         let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
 
-        spawn_gateway_worker(config, audio_routing, mcp_servers, command_rx, event_tx);
+        spawn_gateway_worker(
+            config,
+            audio_routing,
+            self.listen_mode,
+            mcp_servers,
+            command_rx,
+            event_tx,
+        );
 
         self.ws_command_tx = Some(command_tx);
 
@@ -492,6 +514,7 @@ impl MeetingHostShell {
                 self.active_tts_message_index = None;
                 self.active_stt_message_index = None;
                 self.active_intent_trace_message_index = None;
+                self.render_full_chat_history = false;
                 self.network_rtt_ms = None;
                 self.last_audio_event_ui_refresh_at = None;
                 self.aec_stream_delay_ms = None;
@@ -531,6 +554,7 @@ impl MeetingHostShell {
                 self.active_tts_message_index = None;
                 self.active_stt_message_index = None;
                 self.active_intent_trace_message_index = None;
+                self.render_full_chat_history = false;
                 self.last_audio_event_ui_refresh_at = None;
                 self.aec_stream_delay_ms = None;
                 self.aec_capture_callback_delay_ms = None;
@@ -575,6 +599,7 @@ impl MeetingHostShell {
             self.active_tts_message_index = None;
             self.active_stt_message_index = None;
             self.active_intent_trace_message_index = None;
+            self.render_full_chat_history = false;
             self.last_audio_event_ui_refresh_at = None;
             self.notify_views(cx);
             return;
@@ -614,6 +639,7 @@ impl MeetingHostShell {
                 self.active_tts_message_index = None;
                 self.active_stt_message_index = None;
                 self.active_intent_trace_message_index = None;
+                self.render_full_chat_history = false;
                 self.last_audio_event_ui_refresh_at = None;
             }
         }
@@ -633,6 +659,7 @@ impl MeetingHostShell {
                 self.uplink_audio_bytes = 0;
                 self.downlink_audio_frames = 0;
                 self.downlink_audio_bytes = 0;
+                self.render_full_chat_history = false;
                 self.last_audio_event_ui_refresh_at = None;
                 self.aec_stream_delay_ms = None;
                 self.aec_capture_callback_delay_ms = None;
@@ -664,6 +691,7 @@ impl MeetingHostShell {
                 self.active_tts_message_index = None;
                 self.active_stt_message_index = None;
                 self.active_intent_trace_message_index = None;
+                self.render_full_chat_history = false;
                 self.last_audio_event_ui_refresh_at = None;
                 self.aec_stream_delay_ms = None;
                 self.aec_capture_callback_delay_ms = None;

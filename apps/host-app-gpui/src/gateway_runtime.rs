@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use aec3::voip::VoipAec3;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
-use host_core::{ClientTextMessage, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE_HZ};
+use host_core::{ClientTextMessage, ListenMode, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE_HZ};
 use host_platform::{WsGatewayClient, WsGatewayConfig, WsGatewayEvent};
 use opus::{
     Application as OpusApplication, Bitrate as OpusBitrate, Channels as OpusChannels,
@@ -28,8 +28,10 @@ pub const EVENT_CHANNEL_CAPACITY: usize = 512;
 const HOST_INPUT_DEVICE_ENV: &str = "HOST_INPUT_DEVICE";
 const HOST_OUTPUT_DEVICE_ENV: &str = "HOST_OUTPUT_DEVICE";
 const HOST_ENABLE_AEC_ENV: &str = "HOST_ENABLE_AEC";
+const HOST_ENABLE_INPUT_MONITOR_ENV: &str = "HOST_ENABLE_INPUT_MONITOR";
+const HOST_ENABLE_OUTPUT_MONITOR_ENV: &str = "HOST_ENABLE_OUTPUT_MONITOR";
 const OPUS_BITRATE_BPS: i32 = 16_000;
-const OPUS_COMPLEXITY: i32 = 5;
+const OPUS_COMPLEXITY: i32 = 3;
 const OPUS_MAX_PACKET_BYTES: usize = 4000;
 const OPUS_DECODE_MAX_SAMPLES: usize = 4096;
 const DOWNLINK_BUFFER_SECONDS: usize = 2;
@@ -100,6 +102,7 @@ pub fn load_audio_device_state() -> AudioDeviceState {
 pub fn spawn_gateway_worker(
     config: WsGatewayConfig,
     audio_routing: AudioRoutingConfig,
+    initial_listen_mode: ListenMode,
     mcp_servers: Vec<McpServerConfig>,
     mut command_rx: mpsc::Receiver<GatewayCommand>,
     event_tx: mpsc::Sender<UiGatewayEvent>,
@@ -217,6 +220,7 @@ pub fn spawn_gateway_worker(
             let _ = event_tx.send(UiGatewayEvent::AecStateChanged(aec_enabled)).await;
 
             let mut uplink_streaming = false;
+            let mut listen_mode = initial_listen_mode;
             let mut speaker_output_enabled = audio_routing.speaker_output_enabled;
             let mut microphone_capture = None;
             let mut microphone_frame_rx = empty_audio_receiver();
@@ -226,9 +230,12 @@ pub fn spawn_gateway_worker(
             let mut input_monitor_error_reported = false;
             let mut output_monitor_player: Option<DownlinkAudioPlayer> = None;
             let mut output_monitor_error_reported = false;
-            let mirror_output_to_system =
-                should_mirror_selected_output_to_system(audio_routing.output_device_name.as_deref());
-            let mirror_input_to_system = true;
+            let mirror_input_to_system =
+                env_bool_or_default(HOST_ENABLE_INPUT_MONITOR_ENV, false);
+            let mirror_output_to_system = env_bool_or_default(HOST_ENABLE_OUTPUT_MONITOR_ENV, false)
+                && should_mirror_selected_output_to_system(
+                    audio_routing.output_device_name.as_deref(),
+                );
             let mut aec_stats_interval = time::interval(AEC_STATS_EMIT_INTERVAL);
             aec_stats_interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
             let mut ws_rtt_ping_interval = time::interval(WS_RTT_PING_INTERVAL);
@@ -382,8 +389,22 @@ pub fn spawn_gateway_worker(
                             continue;
                         }
 
+                        if let GatewayCommand::SetListenMode(mode) = command {
+                            if listen_mode != mode {
+                                listen_mode = mode;
+                                let _ = event_tx
+                                    .send(UiGatewayEvent::SystemNotice(format!(
+                                        "Listen mode updated: {}",
+                                        listen_mode_code(listen_mode)
+                                    )))
+                                    .await;
+                            }
+                            continue;
+                        }
+
                         let keep_running = handle_gateway_command(
                             command,
+                            listen_mode,
                             &mut client,
                             &event_tx,
                             &mut uplink_streaming,
@@ -410,7 +431,7 @@ pub fn spawn_gateway_worker(
                                     "Microphone capture stopped unexpectedly".to_string(),
                                 ))
                                 .await;
-                            if let Err(error) = client.send_listen_stop().await {
+                            if let Err(error) = client.send_listen_stop_with_mode(listen_mode).await {
                                 let _ = event_tx
                                     .send(UiGatewayEvent::Error(format!(
                                         "Failed to send listen stop after microphone ended: {error}"
@@ -422,7 +443,9 @@ pub fn spawn_gateway_worker(
                             let _ = event_tx
                                 .send(UiGatewayEvent::OutgoingText {
                                     kind: "listen".to_string(),
-                                    payload: to_redacted_pretty_json(&ClientTextMessage::listen_stop()),
+                                    payload: to_redacted_pretty_json(
+                                        &ClientTextMessage::listen_stop_with_mode(listen_mode),
+                                    ),
                                 })
                                 .await;
                             continue;
@@ -713,9 +736,18 @@ fn try_emit_event(event_tx: &mpsc::Sender<UiGatewayEvent>, event: UiGatewayEvent
     let _ = event_tx.try_send(event);
 }
 
+fn listen_mode_code(mode: ListenMode) -> &'static str {
+    match mode {
+        ListenMode::Manual => "manual",
+        ListenMode::Auto => "auto",
+        ListenMode::Realtime => "realtime",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_gateway_command(
     command: GatewayCommand,
+    listen_mode: ListenMode,
     client: &mut WsGatewayClient,
     event_tx: &mpsc::Sender<UiGatewayEvent>,
     uplink_streaming: &mut bool,
@@ -735,7 +767,10 @@ async fn handle_gateway_command(
             false
         }
         GatewayCommand::DetectText(text) => {
-            if let Err(error) = client.send_listen_detect_text(text.clone()).await {
+            if let Err(error) = client
+                .send_listen_detect_text_with_mode(text.clone(), listen_mode)
+                .await
+            {
                 let _ = event_tx
                     .send(UiGatewayEvent::Error(format!(
                         "Failed to send detect text: {error}"
@@ -747,7 +782,9 @@ async fn handle_gateway_command(
             let _ = event_tx
                 .send(UiGatewayEvent::OutgoingText {
                     kind: "listen".to_string(),
-                    payload: to_redacted_pretty_json(&ClientTextMessage::listen_detect_text(text)),
+                    payload: to_redacted_pretty_json(
+                        &ClientTextMessage::listen_detect_text_with_mode(text, listen_mode),
+                    ),
                 })
                 .await;
             true
@@ -757,7 +794,7 @@ async fn handle_gateway_command(
                 return true;
             }
 
-            if let Err(error) = client.send_listen_start().await {
+            if let Err(error) = client.send_listen_start_with_mode(listen_mode).await {
                 let _ = event_tx
                     .send(UiGatewayEvent::Error(format!(
                         "Failed to start uplink stream (listen start failed): {error}"
@@ -769,7 +806,9 @@ async fn handle_gateway_command(
             let _ = event_tx
                 .send(UiGatewayEvent::OutgoingText {
                     kind: "listen".to_string(),
-                    payload: to_redacted_pretty_json(&ClientTextMessage::listen_start()),
+                    payload: to_redacted_pretty_json(&ClientTextMessage::listen_start_with_mode(
+                        listen_mode,
+                    )),
                 })
                 .await;
 
@@ -786,7 +825,7 @@ async fn handle_gateway_command(
                             "Failed to start microphone capture: {error}"
                         )))
                         .await;
-                    if let Err(stop_error) = client.send_listen_stop().await {
+                    if let Err(stop_error) = client.send_listen_stop_with_mode(listen_mode).await {
                         let _ = event_tx
                             .send(UiGatewayEvent::Error(format!(
                                 "Failed to rollback listen stop after microphone init failure: {stop_error}"
@@ -798,7 +837,9 @@ async fn handle_gateway_command(
                     let _ = event_tx
                         .send(UiGatewayEvent::OutgoingText {
                             kind: "listen".to_string(),
-                            payload: to_redacted_pretty_json(&ClientTextMessage::listen_stop()),
+                            payload: to_redacted_pretty_json(
+                                &ClientTextMessage::listen_stop_with_mode(listen_mode),
+                            ),
                         })
                         .await;
                     return true;
@@ -831,7 +872,7 @@ async fn handle_gateway_command(
                 event_tx,
             );
 
-            if let Err(error) = client.send_listen_stop().await {
+            if let Err(error) = client.send_listen_stop_with_mode(listen_mode).await {
                 let _ = event_tx
                     .send(UiGatewayEvent::Error(format!(
                         "Failed to stop uplink stream (listen stop failed): {error}"
@@ -843,13 +884,16 @@ async fn handle_gateway_command(
             let _ = event_tx
                 .send(UiGatewayEvent::OutgoingText {
                     kind: "listen".to_string(),
-                    payload: to_redacted_pretty_json(&ClientTextMessage::listen_stop()),
+                    payload: to_redacted_pretty_json(&ClientTextMessage::listen_stop_with_mode(
+                        listen_mode,
+                    )),
                 })
                 .await;
             true
         }
         GatewayCommand::SetSpeakerOutputEnabled(_) => true,
         GatewayCommand::SetAecEnabled(_) => true,
+        GatewayCommand::SetListenMode(_) => true,
         GatewayCommand::RefreshMcpTools => true,
     }
 }

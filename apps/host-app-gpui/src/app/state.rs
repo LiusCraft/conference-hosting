@@ -1,5 +1,5 @@
 use gpui::SharedString;
-use host_core::InboundTextMessage;
+use host_core::{InboundTextMessage, ListenMode};
 
 use crate::mcp::McpServerProbeStatus;
 
@@ -53,6 +53,7 @@ pub(crate) enum GatewayCommand {
     StopUplinkStream,
     SetSpeakerOutputEnabled(bool),
     SetAecEnabled(bool),
+    SetListenMode(ListenMode),
     RefreshMcpTools,
 }
 

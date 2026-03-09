@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::thread;
 
 use gpui::{div, prelude::*, rgb, Context, FontWeight, SharedString, Window};
@@ -17,6 +17,12 @@ use crate::mcp::{
     DEFAULT_MCP_CONNECT_TIMEOUT_MS, DEFAULT_MCP_REQUEST_TIMEOUT_MS,
 };
 
+#[derive(Debug, Clone)]
+enum LocalProbeScope {
+    All,
+    Single { server_id: String },
+}
+
 impl MeetingHostShell {
     pub(crate) fn reset_mcp_settings_drafts(
         &mut self,
@@ -25,12 +31,21 @@ impl MeetingHostShell {
     ) {
         self.mcp_servers_draft = self.mcp_servers.clone();
         self.show_mcp_editor = false;
-        self.mcp_probe_in_progress = false;
         self.mcp_tools_expanded_servers.clear();
         self.mcp_form_error = None;
         self.mcp_form_notice = None;
         self.reset_mcp_editor(window, cx);
         self.refresh_mcp_probe_statuses_from_draft();
+    }
+
+    pub(crate) fn warmup_mcp_tools_cache_on_startup(&mut self, cx: &mut Context<Self>) {
+        if self.mcp_servers.is_empty() || self.mcp_probe_in_progress {
+            return;
+        }
+
+        self.mcp_servers_draft = self.mcp_servers.clone();
+        self.refresh_mcp_probe_statuses_from_draft();
+        self.start_local_mcp_probe(LocalProbeScope::All, cx);
     }
 
     fn reset_mcp_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -71,7 +86,24 @@ impl MeetingHostShell {
     }
 
     fn refresh_mcp_probe_statuses_from_draft(&mut self) {
-        self.mcp_server_statuses = preview_probe_statuses(&self.mcp_servers_draft);
+        let fallback_statuses = preview_probe_statuses(&self.mcp_servers_draft);
+        let cached_status_map = self
+            .mcp_server_statuses
+            .iter()
+            .cloned()
+            .map(|status| (status.server_id.clone(), status))
+            .collect::<HashMap<_, _>>();
+
+        self.mcp_server_statuses = fallback_statuses
+            .into_iter()
+            .map(|fallback_status| {
+                cached_status_map
+                    .get(&fallback_status.server_id)
+                    .cloned()
+                    .unwrap_or(fallback_status)
+            })
+            .collect();
+
         self.mcp_tools_expanded_servers.retain(|server_id| {
             self.mcp_server_statuses
                 .iter()
@@ -931,11 +963,14 @@ impl MeetingHostShell {
             .find(|server| server.id == server_id)
             .map(|server| server.alias.clone())
             .unwrap_or_else(|| "目标 server".to_string());
-        self.refresh_mcp_probe_statuses_from_draft();
         self.mcp_form_error = None;
         self.mcp_form_notice = Some(format!("正在刷新 `{alias}` 的 tools..."));
-        self.start_local_mcp_probe(cx);
-        self.maybe_refresh_gateway_mcp_tools();
+        self.start_local_mcp_probe(
+            LocalProbeScope::Single {
+                server_id: server_id.to_string(),
+            },
+            cx,
+        );
         self.notify_views(cx);
     }
 
@@ -957,31 +992,52 @@ impl MeetingHostShell {
             return;
         }
 
-        self.refresh_mcp_probe_statuses_from_draft();
         self.mcp_form_error = None;
         self.mcp_form_notice = Some("正在刷新全部 MCP server tools...".to_string());
-        self.start_local_mcp_probe(cx);
+        self.start_local_mcp_probe(LocalProbeScope::All, cx);
         self.maybe_refresh_gateway_mcp_tools();
         self.notify_views(cx);
     }
 
-    fn start_local_mcp_probe(&mut self, cx: &mut Context<Self>) {
-        self.mcp_probe_in_progress = true;
-        let servers = self.mcp_servers_draft.clone();
-        let (result_tx, result_rx) = oneshot::channel::<Result<McpProbeSnapshot, String>>();
+    fn start_local_mcp_probe(&mut self, scope: LocalProbeScope, cx: &mut Context<Self>) {
+        let servers = match &scope {
+            LocalProbeScope::All => self.mcp_servers_draft.clone(),
+            LocalProbeScope::Single { server_id } => self
+                .mcp_servers_draft
+                .iter()
+                .find(|server| server.id == *server_id)
+                .cloned()
+                .into_iter()
+                .collect(),
+        };
 
+        if servers.is_empty() {
+            self.mcp_form_error = Some("未找到需要刷新的 MCP server".to_string());
+            self.mcp_form_notice = None;
+            self.notify_views(cx);
+            return;
+        }
+
+        self.mcp_probe_in_progress = true;
+        let (result_tx, result_rx) =
+            oneshot::channel::<(LocalProbeScope, Result<McpProbeSnapshot, String>)>();
+
+        let scope_for_task = scope.clone();
         thread::spawn(move || {
-            let _ = result_tx.send(probe_servers_with_dedicated_runtime(servers));
+            let _ = result_tx.send((
+                scope_for_task,
+                probe_servers_with_dedicated_runtime(servers),
+            ));
         });
 
         cx.spawn(async move |this, cx| {
-            let result = match result_rx.await {
-                Ok(result) => result,
-                Err(_) => Err("MCP 刷新任务已中断".to_string()),
+            let (scope, result) = match result_rx.await {
+                Ok((scope, result)) => (scope, result),
+                Err(_) => (LocalProbeScope::All, Err("MCP 刷新任务已中断".to_string())),
             };
 
             let _ = this.update(cx, |shell, cx| {
-                shell.finish_local_mcp_probe(result, cx);
+                shell.finish_local_mcp_probe(scope, result, cx);
             });
         })
         .detach();
@@ -989,44 +1045,80 @@ impl MeetingHostShell {
 
     fn finish_local_mcp_probe(
         &mut self,
+        scope: LocalProbeScope,
         result: Result<McpProbeSnapshot, String>,
         cx: &mut Context<Self>,
     ) {
         self.mcp_probe_in_progress = false;
 
         match result {
-            Ok(snapshot) => {
-                self.mcp_server_statuses = snapshot.statuses;
-                self.mcp_tools_expanded_servers.retain(|server_id| {
-                    self.mcp_server_statuses
+            Ok(snapshot) => match scope {
+                LocalProbeScope::All => {
+                    self.mcp_server_statuses = snapshot.statuses;
+                    self.refresh_mcp_probe_statuses_from_draft();
+
+                    let failed_servers = self
+                        .mcp_server_statuses
                         .iter()
-                        .any(|status| status.server_id == *server_id && !status.tools.is_empty())
-                });
+                        .filter(|status| status.state == McpProbeState::Failed)
+                        .map(|status| format!("{} ({})", status.alias, status.detail))
+                        .collect::<Vec<_>>();
 
-                let failed_servers = self
-                    .mcp_server_statuses
-                    .iter()
-                    .filter(|status| status.state == McpProbeState::Failed)
-                    .map(|status| format!("{} ({})", status.alias, status.detail))
-                    .collect::<Vec<_>>();
-
-                if failed_servers.is_empty() {
-                    self.mcp_form_error = None;
-                    self.mcp_form_notice = Some(format!(
-                        "MCP 刷新完成，共发现 {} 个 tools",
-                        snapshot.tool_count
-                    ));
-                } else {
-                    self.mcp_form_notice = Some(format!(
-                        "MCP 刷新完成，当前共 {} 个 tools",
-                        snapshot.tool_count
-                    ));
-                    self.mcp_form_error = Some(format!(
-                        "部分 server 刷新失败: {}",
-                        failed_servers.join("; ")
-                    ));
+                    if failed_servers.is_empty() {
+                        self.mcp_form_error = None;
+                        self.mcp_form_notice = Some(format!(
+                            "MCP 刷新完成，共发现 {} 个 tools",
+                            snapshot.tool_count
+                        ));
+                    } else {
+                        self.mcp_form_notice = Some(format!(
+                            "MCP 刷新完成，当前共 {} 个 tools",
+                            snapshot.tool_count
+                        ));
+                        self.mcp_form_error = Some(format!(
+                            "部分 server 刷新失败: {}",
+                            failed_servers.join("; ")
+                        ));
+                    }
                 }
-            }
+                LocalProbeScope::Single { server_id } => {
+                    let probe_status = snapshot
+                        .statuses
+                        .into_iter()
+                        .find(|status| status.server_id == server_id);
+                    match probe_status {
+                        Some(status) => {
+                            if let Some(existing) = self
+                                .mcp_server_statuses
+                                .iter_mut()
+                                .find(|existing| existing.server_id == status.server_id)
+                            {
+                                *existing = status.clone();
+                            } else {
+                                self.mcp_server_statuses.push(status.clone());
+                            }
+                            self.refresh_mcp_probe_statuses_from_draft();
+
+                            if status.state == McpProbeState::Failed {
+                                self.mcp_form_notice = None;
+                                self.mcp_form_error =
+                                    Some(format!("`{}` 刷新失败: {}", status.alias, status.detail));
+                            } else {
+                                self.mcp_form_error = None;
+                                self.mcp_form_notice = Some(format!(
+                                    "`{}` 刷新完成，发现 {} 个 tools",
+                                    status.alias, status.tool_count
+                                ));
+                            }
+                        }
+                        None => {
+                            self.mcp_form_notice = None;
+                            self.mcp_form_error =
+                                Some("未获取到指定 server 的刷新结果".to_string());
+                        }
+                    }
+                }
+            },
             Err(error) => {
                 self.mcp_form_notice = None;
                 self.mcp_form_error = Some(format!("MCP 刷新失败: {error}"));

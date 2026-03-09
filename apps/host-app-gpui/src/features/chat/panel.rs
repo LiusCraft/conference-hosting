@@ -7,6 +7,8 @@ use crate::app::shell::{ui_button_icon, ButtonIconTone, MeetingHostShell};
 use crate::app::state::{ChatRole, ConnectionState};
 use crate::components::icon::IconName;
 
+const LIVE_CHAT_RENDER_LIMIT: usize = 80;
+
 impl MeetingHostShell {
     pub(crate) fn render_chat_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let is_connected = matches!(self.connection_state, ConnectionState::Connected);
@@ -98,6 +100,17 @@ impl MeetingHostShell {
     }
 
     fn render_message_stream_panel(&mut self, cx: &mut Context<Self>) -> Div {
+        let total_messages = self.chat_messages.len();
+        let live_window_start = if self.follow_latest_chat_messages
+            && !self.render_full_chat_history
+            && total_messages > LIVE_CHAT_RENDER_LIMIT
+        {
+            total_messages - LIVE_CHAT_RENDER_LIMIT
+        } else {
+            0
+        };
+        let hidden_message_count = live_window_start;
+
         let mut message_stream = div()
             .id("message-stream")
             .flex()
@@ -122,17 +135,53 @@ impl MeetingHostShell {
                     .child("暂无消息，连接后会显示实时会话记录。"),
             );
         } else {
-            message_stream =
-                message_stream.children(self.chat_messages.iter().rev().enumerate().map(
-                    |(display_index, message)| {
-                        let message_index = self
-                            .chat_messages
-                            .len()
+            if hidden_message_count > 0 {
+                let view = cx.entity().downgrade();
+                message_stream = message_stream.child(
+                    div()
+                        .mx_4()
+                        .mb_2()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(0x223148))
+                        .bg(rgb(0x0c1421))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(div().text_xs().text_color(rgb(0x7f8ca3)).child(format!(
+                            "实时模式仅渲染最近 {} 条消息（已折叠 {} 条）",
+                            LIVE_CHAT_RENDER_LIMIT, hidden_message_count
+                        )))
+                        .child(
+                            Button::new("expand-full-chat-history")
+                                .outline()
+                                .h_7()
+                                .px_3()
+                                .text_xs()
+                                .child("查看全部")
+                                .on_click(move |_, _, cx| {
+                                    let _ = view
+                                        .update(cx, |view, cx| view.expand_full_chat_history(cx));
+                                }),
+                        ),
+                );
+            }
+
+            message_stream = message_stream.children(
+                self.chat_messages[live_window_start..]
+                    .iter()
+                    .rev()
+                    .enumerate()
+                    .map(|(display_index, message)| {
+                        let message_index = total_messages
                             .saturating_sub(display_index)
                             .saturating_sub(1);
                         self.render_chat_message(message_index, message, cx)
-                    },
-                ));
+                    }),
+            );
         }
 
         let mut message_stream_panel = div()

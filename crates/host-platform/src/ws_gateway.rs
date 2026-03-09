@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use host_core::{
-    ClientTextMessage, HelloMessage, InboundTextMessage, JsonRpcMessage, McpEnvelopeMessage,
+    ClientTextMessage, HelloMessage, InboundTextMessage, JsonRpcMessage, ListenMode,
+    McpEnvelopeMessage,
 };
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
@@ -241,18 +242,40 @@ impl WsGatewayClient {
     }
 
     pub async fn send_listen_start(&self) -> Result<(), WsGatewayError> {
-        self.send_text(ClientTextMessage::listen_start()).await
+        self.send_listen_start_with_mode(ListenMode::Manual).await
+    }
+
+    pub async fn send_listen_start_with_mode(
+        &self,
+        mode: ListenMode,
+    ) -> Result<(), WsGatewayError> {
+        self.send_text(ClientTextMessage::listen_start_with_mode(mode))
+            .await
     }
 
     pub async fn send_listen_stop(&self) -> Result<(), WsGatewayError> {
-        self.send_text(ClientTextMessage::listen_stop()).await
+        self.send_listen_stop_with_mode(ListenMode::Manual).await
+    }
+
+    pub async fn send_listen_stop_with_mode(&self, mode: ListenMode) -> Result<(), WsGatewayError> {
+        self.send_text(ClientTextMessage::listen_stop_with_mode(mode))
+            .await
     }
 
     pub async fn send_listen_detect_text(
         &self,
         text: impl Into<String>,
     ) -> Result<(), WsGatewayError> {
-        self.send_text(ClientTextMessage::listen_detect_text(text))
+        self.send_listen_detect_text_with_mode(text, ListenMode::Manual)
+            .await
+    }
+
+    pub async fn send_listen_detect_text_with_mode(
+        &self,
+        text: impl Into<String>,
+        mode: ListenMode,
+    ) -> Result<(), WsGatewayError> {
+        self.send_text(ClientTextMessage::listen_detect_text_with_mode(text, mode))
             .await
     }
 
@@ -344,6 +367,7 @@ mod tests {
     use std::time::Duration;
 
     use futures_util::{SinkExt, StreamExt};
+    use host_core::ListenMode;
     use tokio::net::TcpListener;
     use tokio::time;
     use tokio_tungstenite::accept_hdr_async;
@@ -458,7 +482,7 @@ mod tests {
             let listen_start: serde_json::Value =
                 serde_json::from_str(&listen_start_raw).expect("parse listen start");
             assert_eq!(listen_start["type"], "listen");
-            assert_eq!(listen_start["mode"], "manual");
+            assert_eq!(listen_start["mode"], "realtime");
             assert_eq!(listen_start["state"], "start");
 
             let upstream_audio = expect_binary(
@@ -514,7 +538,7 @@ mod tests {
         assert_eq!(gateway.session_id(), "session-001");
 
         gateway
-            .send_listen_start()
+            .send_listen_start_with_mode(ListenMode::Realtime)
             .await
             .expect("send listen start");
         gateway

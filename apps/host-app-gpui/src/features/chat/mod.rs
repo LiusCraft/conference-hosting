@@ -369,10 +369,19 @@ impl MeetingHostShell {
     }
 
     pub(crate) fn jump_to_latest_chat_messages(&mut self, cx: &mut Context<Self>) {
+        self.render_full_chat_history = false;
         self.follow_latest_chat_messages = true;
         self.pending_chat_messages = 0;
         self.has_pending_chat_messages = false;
         self.chat_scroll.scroll_to_bottom();
+        self.notify_views(cx);
+    }
+
+    pub(crate) fn expand_full_chat_history(&mut self, cx: &mut Context<Self>) {
+        self.render_full_chat_history = true;
+        self.follow_latest_chat_messages = false;
+        self.pending_chat_messages = 0;
+        self.has_pending_chat_messages = false;
         self.notify_views(cx);
     }
 

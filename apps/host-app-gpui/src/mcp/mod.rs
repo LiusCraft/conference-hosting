@@ -349,6 +349,48 @@ fn log_mcp_info(alias: &str, stage: &str, detail: &str) {
     eprintln!("[mcp][info] alias={alias} stage={stage} detail={detail}");
 }
 
+fn format_error_chain(error: &dyn std::error::Error) -> String {
+    let mut output = error.to_string();
+    let mut source = error.source();
+    while let Some(next) = source {
+        output.push_str(" | caused_by: ");
+        output.push_str(&next.to_string());
+        source = next.source();
+    }
+    output
+}
+
+fn describe_server_connect_params(server: &McpServerConfig) -> String {
+    match &server.transport {
+        McpTransportConfig::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } => format!(
+            "command={} args_count={} env_count={} cwd_set={}",
+            command,
+            args.len(),
+            env.len(),
+            cwd.as_ref().is_some_and(|value| !value.trim().is_empty())
+        ),
+        McpTransportConfig::Sse { url, headers } => format!(
+            "url={} header_keys={} auth_via_header={}",
+            url,
+            headers.keys().cloned().collect::<Vec<_>>().join(","),
+            headers
+                .keys()
+                .any(|key| key.eq_ignore_ascii_case("authorization"))
+        ),
+        McpTransportConfig::Stream { url, headers, auth } => format!(
+            "url={} header_keys={} auth_field_set={}",
+            url,
+            headers.keys().cloned().collect::<Vec<_>>().join(","),
+            auth.as_ref().is_some_and(|value| !value.trim().is_empty())
+        ),
+    }
+}
+
 pub(crate) fn probe_servers_with_dedicated_runtime(
     servers: Vec<McpServerConfig>,
 ) -> Result<McpProbeSnapshot, String> {
@@ -433,7 +475,7 @@ impl McpBridge {
             log_mcp_info(
                 &server.alias,
                 "connect_begin",
-                &format!("endpoint={}", server.endpoint_summary()),
+                &describe_server_connect_params(server),
             );
 
             let mut service = match time::timeout(
@@ -886,7 +928,7 @@ async fn connect_upstream_service(server: &McpServerConfig) -> Result<UpstreamSe
 
             ().serve(transport)
                 .await
-                .map_err(|error| format!("stdio 连接失败: {error}"))
+                .map_err(|error| format!("stdio 连接失败: {}", format_error_chain(&error)))
         }
         McpTransportConfig::Sse { url, headers } => {
             connect_streamable_http_service(url, headers, None).await
@@ -907,9 +949,28 @@ async fn connect_streamable_http_service(
         config = config.auth_header(auth_header);
     }
 
+    let mut custom_headers = HashMap::new();
+    for (key, value) in headers {
+        if key.eq_ignore_ascii_case("authorization") {
+            continue;
+        }
+
+        let header_name = key
+            .parse()
+            .map_err(|error| format!("invalid header name `{key}`: {error}"))?;
+        let header_value = value
+            .parse()
+            .map_err(|error| format!("invalid header value for `{key}`: {error}"))?;
+        custom_headers.insert(header_name, header_value);
+    }
+
+    if !custom_headers.is_empty() {
+        config = config.custom_headers(custom_headers);
+    }
+
     ().serve(StreamableHttpClientTransport::from_config(config))
         .await
-        .map_err(|error| format!("streamable-http 连接失败: {error}"))
+        .map_err(|error| format!("streamable-http 连接失败: {}", format_error_chain(&error)))
 }
 
 async fn fetch_upstream_tools(
@@ -925,8 +986,9 @@ async fn fetch_upstream_tools(
         Ok(Ok(result)) => result,
         Ok(Err(error)) => {
             return Err(format!(
-                "tools/list 失败 ({}): {error}",
-                server.transport_kind().as_label()
+                "tools/list 失败 ({}): {}",
+                server.transport_kind().as_label(),
+                format_error_chain(&error)
             ));
         }
         Err(_) => {

@@ -23,15 +23,27 @@ impl ClientTextMessage {
     }
 
     pub fn listen_start() -> Self {
-        Self::Listen(ListenMessage::start())
+        Self::listen_start_with_mode(ListenMode::Manual)
+    }
+
+    pub fn listen_start_with_mode(mode: ListenMode) -> Self {
+        Self::Listen(ListenMessage::start(mode))
     }
 
     pub fn listen_stop() -> Self {
-        Self::Listen(ListenMessage::stop())
+        Self::listen_stop_with_mode(ListenMode::Manual)
+    }
+
+    pub fn listen_stop_with_mode(mode: ListenMode) -> Self {
+        Self::Listen(ListenMessage::stop(mode))
     }
 
     pub fn listen_detect_text(text: impl Into<String>) -> Self {
-        Self::Listen(ListenMessage::detect_text(text))
+        Self::listen_detect_text_with_mode(text, ListenMode::Manual)
+    }
+
+    pub fn listen_detect_text_with_mode(text: impl Into<String>, mode: ListenMode) -> Self {
+        Self::Listen(ListenMessage::detect_text(mode, text))
     }
 
     pub fn mcp(message: McpEnvelopeMessage) -> Self {
@@ -186,35 +198,37 @@ pub struct ListenMessage {
 }
 
 impl ListenMessage {
-    pub fn start() -> Self {
+    pub fn start(mode: ListenMode) -> Self {
         Self {
-            mode: ListenMode::Manual,
+            mode,
             state: ListenState::Start,
             text: None,
         }
     }
 
-    pub fn stop() -> Self {
+    pub fn stop(mode: ListenMode) -> Self {
         Self {
-            mode: ListenMode::Manual,
+            mode,
             state: ListenState::Stop,
             text: None,
         }
     }
 
-    pub fn detect_text(text: impl Into<String>) -> Self {
+    pub fn detect_text(mode: ListenMode, text: impl Into<String>) -> Self {
         Self {
-            mode: ListenMode::Manual,
+            mode,
             state: ListenState::Detect,
             text: Some(text.into()),
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ListenMode {
     Manual,
+    Auto,
+    Realtime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -332,6 +346,16 @@ mod tests {
         assert_eq!(value["mode"], "manual");
         assert_eq!(value["state"], "detect");
         assert_eq!(value["text"], "hello");
+    }
+
+    #[test]
+    fn listen_start_with_mode_serializes_selected_mode() {
+        let message = ClientTextMessage::listen_start_with_mode(super::ListenMode::Realtime);
+        let value = serde_json::to_value(message).expect("serialize listen start with mode");
+
+        assert_eq!(value["type"], "listen");
+        assert_eq!(value["mode"], "realtime");
+        assert_eq!(value["state"], "start");
     }
 
     #[test]

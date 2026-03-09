@@ -2,6 +2,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
+use host_core::ListenMode;
 use serde::{Deserialize, Serialize};
 
 use crate::mcp::McpServerConfig;
@@ -36,6 +37,8 @@ pub(crate) struct PersistedUiSettings {
     pub(crate) aec_enabled: Option<bool>,
     #[serde(default)]
     pub(crate) show_ai_emotion_messages: Option<bool>,
+    #[serde(default)]
+    pub(crate) listen_mode: Option<ListenMode>,
 }
 
 pub(crate) fn load_persisted_app_settings() -> PersistedAppSettings {
