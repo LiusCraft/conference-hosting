@@ -1,0 +1,53 @@
+name: Release macOS App on Tag
+
+on:
+  push:
+    tags:
+      - "*"
+
+jobs:
+  build-macos-app:
+    name: Build and release macOS app
+    runs-on: macos-14
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Package app bundle
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          APP_VERSION="${VERSION}" bash apps/host-app-gpui/scripts/package_macos_app.sh
+
+      - name: Archive .app bundle
+        run: |
+          mkdir -p release-artifacts
+          ARCHIVE_NAME="AI-Meeting-Host-${GITHUB_REF_NAME}-macos.zip"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "apps/host-app-gpui/dist/AI Meeting Host.app" \
+            "release-artifacts/${ARCHIVE_NAME}"
+          shasum -a 256 "release-artifacts/${ARCHIVE_NAME}" > "release-artifacts/${ARCHIVE_NAME}.sha256"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI-Meeting-Host-${{ github.ref_name }}-macos
+          path: release-artifacts/*
+          if-no-files-found: error
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-artifacts/AI-Meeting-Host-${{ github.ref_name }}-macos.zip
+            release-artifacts/AI-Meeting-Host-${{ github.ref_name }}-macos.zip.sha256
+          generate_release_notes: true

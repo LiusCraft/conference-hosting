@@ -9,7 +9,13 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 APP_DIR="$ROOT_DIR/apps/host-app-gpui"
 DIST_DIR="$APP_DIR/dist"
-BUNDLE_DIR="$DIST_DIR/AI Meeting Host.app"
+
+APP_NAME="${APP_NAME:-AI Meeting Host}"
+APP_VERSION="${APP_VERSION:-0.1.0}"
+APP_BUILD_NUMBER="${APP_BUILD_NUMBER:-$APP_VERSION}"
+BUNDLE_IDENTIFIER="${BUNDLE_IDENTIFIER:-com.liuscraft.ai-meeting-host}"
+
+BUNDLE_DIR="$DIST_DIR/$APP_NAME.app"
 CONTENTS_DIR="$BUNDLE_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -31,7 +37,7 @@ cp "$BINARY_PATH" "$MACOS_DIR/host-app-gpui"
 chmod +x "$MACOS_DIR/host-app-gpui"
 cp "$ICON_PATH" "$RESOURCES_DIR/app-taskbar-logo.icns"
 
-cat > "$CONTENTS_DIR/Info.plist" <<'EOF'
+cat > "$CONTENTS_DIR/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -39,23 +45,23 @@ cat > "$CONTENTS_DIR/Info.plist" <<'EOF'
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>AI Meeting Host</string>
+  <string>$APP_NAME</string>
   <key>CFBundleExecutable</key>
   <string>host-app-gpui</string>
   <key>CFBundleIconFile</key>
   <string>app-taskbar-logo.icns</string>
   <key>CFBundleIdentifier</key>
-  <string>com.liuscraft.ai-meeting-host</string>
+  <string>$BUNDLE_IDENTIFIER</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>AI Meeting Host</string>
+  <string>$APP_NAME</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
-  <string>0.1.0</string>
+  <string>$APP_BUILD_NUMBER</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
   <key>NSHighResolutionCapable</key>
