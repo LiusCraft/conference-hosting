@@ -437,6 +437,7 @@ impl MeetingHostShell {
             Some(self.auth_token.as_str()),
             true,
         );
+        self.enforce_aec_for_shared_audio_route();
         let audio_routing = self.build_audio_routing_config();
         let mcp_servers = self.mcp_servers.clone();
         self.ws_url = config.server_url.clone();
@@ -673,6 +674,19 @@ impl MeetingHostShell {
                     "System",
                     format!("Handshake finished, session_id={session_id}"),
                 );
+
+                if let Some(command_tx) = self.ws_command_tx.as_ref() {
+                    if command_tx
+                        .try_send(GatewayCommand::StartUplinkStream)
+                        .is_err()
+                    {
+                        self.push_chat(
+                            ChatRole::Error,
+                            "Error",
+                            "Connected, but failed to auto-start microphone uplink",
+                        );
+                    }
+                }
                 true
             }
             UiGatewayEvent::Disconnected => {
@@ -749,6 +763,7 @@ impl MeetingHostShell {
             }
             UiGatewayEvent::AecStateChanged(enabled) => {
                 self.aec_enabled = enabled;
+                self.aec_enabled_draft = enabled;
                 if !enabled {
                     self.aec_stream_delay_ms = None;
                     self.aec_capture_callback_delay_ms = None;
@@ -1017,8 +1032,6 @@ impl MeetingHostShell {
 
 impl Render for MeetingHostShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_chat_follow_state();
-
         let custom_titlebar = self.render_custom_titlebar(cx);
         let sidebar = self.render_sidebar(cx);
         let chat_panel = self.render_chat_panel(window, cx);

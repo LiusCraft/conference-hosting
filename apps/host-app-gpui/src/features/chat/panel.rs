@@ -101,15 +101,13 @@ impl MeetingHostShell {
 
     fn render_message_stream_panel(&mut self, cx: &mut Context<Self>) -> Div {
         let total_messages = self.chat_messages.len();
-        let live_window_start = if self.follow_latest_chat_messages
-            && !self.render_full_chat_history
-            && total_messages > LIVE_CHAT_RENDER_LIMIT
-        {
-            total_messages - LIVE_CHAT_RENDER_LIMIT
-        } else {
-            0
-        };
-        let hidden_message_count = live_window_start;
+        let visible_message_count =
+            if self.follow_latest_chat_messages && !self.render_full_chat_history {
+                total_messages.min(LIVE_CHAT_RENDER_LIMIT)
+            } else {
+                total_messages
+            };
+        let hidden_message_count = total_messages.saturating_sub(visible_message_count);
 
         let mut message_stream = div()
             .id("message-stream")
@@ -171,12 +169,12 @@ impl MeetingHostShell {
             }
 
             message_stream = message_stream.children(
-                self.chat_messages[live_window_start..]
+                self.chat_messages[..visible_message_count]
                     .iter()
                     .rev()
                     .enumerate()
                     .map(|(display_index, message)| {
-                        let message_index = total_messages
+                        let message_index = visible_message_count
                             .saturating_sub(display_index)
                             .saturating_sub(1);
                         self.render_chat_message(message_index, message, cx)

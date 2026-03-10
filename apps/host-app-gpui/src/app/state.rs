@@ -107,4 +107,12 @@ impl AudioRoutingConfig {
     pub(crate) fn output_label(&self) -> &str {
         self.output_device_name.as_deref().unwrap_or("default")
     }
+
+    pub(crate) fn has_shared_input_output_route(&self) -> bool {
+        self.input_device_name
+            .as_deref()
+            .zip(self.output_device_name.as_deref())
+            .map(|(input, output)| input.eq_ignore_ascii_case(output))
+            .unwrap_or(false)
+    }
 }

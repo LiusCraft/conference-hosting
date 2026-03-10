@@ -161,13 +161,61 @@ pub(crate) fn selected_input_selection(
 }
 
 impl MeetingHostShell {
+    pub(crate) fn has_shared_audio_route_risk(&self) -> bool {
+        let same_named_device = self
+            .selected_input_device_name_raw()
+            .zip(self.selected_output_device_name())
+            .map(|(input, output)| input.eq_ignore_ascii_case(output))
+            .unwrap_or(false);
+        let same_loopback_route = self.input_from_output
+            && matches!(
+                (self.selected_input_output_index, self.selected_output_index),
+                (Some(input_index), Some(output_index)) if input_index == output_index
+            );
+
+        same_named_device || same_loopback_route
+    }
+
+    pub(crate) fn enforce_aec_for_shared_audio_route(&mut self) {
+        if !self.has_shared_audio_route_risk() {
+            return;
+        }
+
+        self.aec_enabled_draft = true;
+        if self.aec_enabled {
+            return;
+        }
+
+        self.aec_enabled = true;
+        if matches!(self.connection_state, ConnectionState::Connected) {
+            if let Some(command_tx) = self.ws_command_tx.as_ref() {
+                if command_tx
+                    .try_send(GatewayCommand::SetAecEnabled(true))
+                    .is_err()
+                {
+                    self.push_chat(
+                        crate::app::state::ChatRole::Error,
+                        "Error",
+                        "Failed to sync forced AEC state to gateway worker",
+                    );
+                }
+            }
+        }
+
+        self.push_chat(
+            crate::app::state::ChatRole::System,
+            "System",
+            "输入/输出使用同一路由，已强制开启 AEC 以降低回声",
+        );
+    }
+
     pub(crate) fn build_audio_routing_config(&self) -> AudioRoutingConfig {
         AudioRoutingConfig {
             input_device_name: self.selected_input_device_name_raw().map(ToOwned::to_owned),
             input_from_output: self.input_from_output,
             output_device_name: self.selected_output_device_name().map(ToOwned::to_owned),
             speaker_output_enabled: self.speaker_output_enabled,
-            aec_enabled: self.aec_enabled,
+            aec_enabled: self.aec_enabled || self.has_shared_audio_route_risk(),
         }
     }
 
@@ -327,6 +375,7 @@ impl MeetingHostShell {
     }
 
     fn announce_audio_route_change(&mut self, reason: &str, cx: &mut Context<Self>) {
+        self.enforce_aec_for_shared_audio_route();
         let input_name = self.selected_input_device_label();
         let output_name = self.selected_output_device_name().unwrap_or("default");
         let message = if matches!(self.connection_state, ConnectionState::Idle) {

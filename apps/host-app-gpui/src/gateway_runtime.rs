@@ -182,10 +182,20 @@ pub fn spawn_gateway_worker(
                     .await;
             }
 
-            let mut aec_enabled = if env_optional(HOST_ENABLE_AEC_ENV).is_some() {
-                env_bool_or_default(HOST_ENABLE_AEC_ENV, true)
+            let force_aec_for_shared_route = audio_routing.has_shared_input_output_route();
+            if force_aec_for_shared_route {
+                let _ = event_tx
+                    .send(UiGatewayEvent::SystemNotice(
+                        "Input/output share same route, forcing AEC enabled".to_string(),
+                    ))
+                    .await;
+            }
+
+            let has_aec_env_override = env_optional(HOST_ENABLE_AEC_ENV).is_some();
+            let mut aec_enabled = if force_aec_for_shared_route {
+                true
             } else {
-                audio_routing.aec_enabled
+                env_bool_or_default(HOST_ENABLE_AEC_ENV, audio_routing.aec_enabled)
             };
 
             let mut echo_canceller = if aec_enabled {
@@ -210,9 +220,11 @@ pub fn spawn_gateway_worker(
                 }
             } else {
                 let _ = event_tx
-                    .send(UiGatewayEvent::SystemNotice(
-                        "AEC disabled by env HOST_ENABLE_AEC".to_string(),
-                    ))
+                    .send(UiGatewayEvent::SystemNotice(if has_aec_env_override {
+                        "AEC disabled by env HOST_ENABLE_AEC".to_string()
+                    } else {
+                        "AEC disabled".to_string()
+                    }))
                     .await;
                 None
             };
@@ -310,6 +322,19 @@ pub fn spawn_gateway_worker(
                         }
 
                         if let GatewayCommand::SetAecEnabled(enabled) = command {
+                            if force_aec_for_shared_route && !enabled {
+                                let notice = if aec_enabled {
+                                    "Input/output share same route, AEC stays enabled"
+                                } else {
+                                    "Shared route requires AEC, but AEC is currently unavailable"
+                                };
+                                let _ = event_tx
+                                    .send(UiGatewayEvent::SystemNotice(notice.to_string()))
+                                    .await;
+                                let _ = event_tx.send(UiGatewayEvent::AecStateChanged(aec_enabled)).await;
+                                continue;
+                            }
+
                             if aec_enabled == enabled {
                                 continue;
                             }

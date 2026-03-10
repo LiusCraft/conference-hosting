@@ -1,6 +1,7 @@
 use gpui::{div, prelude::*, px, rgb, Context, FontWeight, SharedString, Window};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
+use gpui_component::Disableable;
 use host_core::{ListenMode, AUDIO_FRAME_SAMPLES, AUDIO_SAMPLE_RATE_HZ};
 
 use crate::app::persistence::{
@@ -138,6 +139,16 @@ impl MeetingHostShell {
     }
 
     pub(crate) fn toggle_aec_enabled(&mut self, cx: &mut Context<Self>) {
+        if self.has_shared_audio_route_risk() && self.aec_enabled_draft {
+            self.push_chat(
+                crate::app::state::ChatRole::System,
+                "System",
+                "输入/输出同一路由时 AEC 为强制开启",
+            );
+            self.notify_views(cx);
+            return;
+        }
+
         self.aec_enabled_draft = !self.aec_enabled_draft;
         self.notify_views(cx);
     }
@@ -166,11 +177,18 @@ impl MeetingHostShell {
     }
 
     fn apply_aec_enabled(&mut self, enabled: bool) {
-        if self.aec_enabled == enabled {
+        let force_enabled = self.has_shared_audio_route_risk();
+        let next_enabled = enabled || force_enabled;
+
+        if self.aec_enabled == next_enabled {
+            if force_enabled {
+                self.aec_enabled_draft = true;
+            }
             return;
         }
 
-        self.aec_enabled = enabled;
+        self.aec_enabled = next_enabled;
+        self.aec_enabled_draft = next_enabled;
         let connected = matches!(
             self.connection_state,
             crate::app::state::ConnectionState::Connected
@@ -199,6 +217,13 @@ impl MeetingHostShell {
             "AEC disabled"
         };
         self.push_chat(crate::app::state::ChatRole::System, "System", state);
+        if force_enabled {
+            self.push_chat(
+                crate::app::state::ChatRole::System,
+                "System",
+                "输入/输出同一路由时，AEC 会保持强制开启",
+            );
+        }
         if !connected {
             self.push_chat(
                 crate::app::state::ChatRole::System,
@@ -260,6 +285,7 @@ impl MeetingHostShell {
             .selected_output_device_name()
             .unwrap_or("default")
             .to_string();
+        let force_aec_for_route = self.has_shared_audio_route_risk();
         let ws_url_input = self.render_ws_url_input(window, cx);
         let authorization_input = self.render_authorization_input(window, cx);
         let device_id_input = self.render_device_id_input(window, cx);
@@ -436,7 +462,9 @@ impl MeetingHostShell {
                                     .child(setting_row("编解码", "Opus (上行/下行)"))
                                     .child(setting_row(
                                         "AEC状态",
-                                        if self.aec_enabled_draft {
+                                        if force_aec_for_route {
+                                            "启用（AEC3，强制）".to_string()
+                                        } else if self.aec_enabled_draft {
                                             "启用（AEC3）".to_string()
                                         } else {
                                             "关闭".to_string()
@@ -514,12 +542,16 @@ impl MeetingHostShell {
                                         .px_3()
                                         .text_sm()
                                         .font_weight(FontWeight::SEMIBOLD)
-                                        .when(self.aec_enabled_draft, |this| {
+                                        .when(force_aec_for_route, |this| {
+                                            this.warning().child("强制启用")
+                                        })
+                                        .when(!force_aec_for_route && self.aec_enabled_draft, |this| {
                                             this.success().child("已启用")
                                         })
-                                        .when(!self.aec_enabled_draft, |this| {
+                                        .when(!force_aec_for_route && !self.aec_enabled_draft, |this| {
                                             this.outline().child("已关闭")
                                         })
+                                        .disabled(force_aec_for_route)
                                         .on_click(move |_, _, cx| {
                                             let _ = toggle_aec_view.update(cx, |view, cx| {
                                                 view.toggle_aec_enabled(cx)
@@ -528,6 +560,21 @@ impl MeetingHostShell {
                                 ),
                             ),
                     )
+                    .when(force_aec_for_route, |this| {
+                        this.child(
+                            div()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(rgb(0x6f5320))
+                                .bg(rgb(0x30230f))
+                                .px_3()
+                                .py_2()
+                                .text_xs()
+                                .text_color(rgb(0xf4c879))
+                                .whitespace_normal()
+                                .child("输入/输出使用同一路由，可能出现残留回声，建议分离采集与播放设备。"),
+                        )
+                    })
                     .child(
                         div()
                             .flex()

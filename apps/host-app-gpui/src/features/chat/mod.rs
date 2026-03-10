@@ -84,6 +84,8 @@ impl MeetingHostShell {
         turn_key: Option<&str>,
         payload: &Map<String, Value>,
     ) -> bool {
+        self.sync_chat_follow_state();
+
         let Some(index) = self.active_intent_trace_message_index else {
             return false;
         };
@@ -209,6 +211,8 @@ impl MeetingHostShell {
     }
 
     fn append_to_active_stt_transcript(&mut self, transcript: &str) -> bool {
+        self.sync_chat_follow_state();
+
         let Some(index) = self.active_stt_message_index else {
             return false;
         };
@@ -236,6 +240,8 @@ impl MeetingHostShell {
     }
 
     fn upsert_tts_sentence_text(&mut self, text: &str, response_latency_ms: Option<u64>) {
+        self.sync_chat_follow_state();
+
         if self.append_to_active_tts_message(text, response_latency_ms) {
             return;
         }
@@ -274,6 +280,8 @@ impl MeetingHostShell {
         text: &str,
         response_latency_ms: Option<u64>,
     ) -> bool {
+        self.sync_chat_follow_state();
+
         let Some(index) = self.active_tts_message_index else {
             return false;
         };
@@ -359,11 +367,17 @@ impl MeetingHostShell {
     }
 
     pub(crate) fn sync_chat_follow_state(&mut self) {
-        if self.is_chat_scrolled_to_bottom() {
+        let at_bottom = self.is_chat_scrolled_to_bottom();
+        if at_bottom {
             self.follow_latest_chat_messages = true;
             self.pending_chat_messages = 0;
             self.has_pending_chat_messages = false;
-        } else if self.chat_scroll.max_offset().height > px(0.0) {
+        }
+
+        if !at_bottom
+            && self.follow_latest_chat_messages
+            && self.chat_scroll.max_offset().height > px(0.0)
+        {
             self.follow_latest_chat_messages = false;
         }
     }

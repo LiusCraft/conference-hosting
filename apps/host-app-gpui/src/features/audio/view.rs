@@ -101,6 +101,37 @@ impl MeetingHostShell {
             )
             .child(self.render_input_selector())
             .child(self.render_output_selector())
+            .when(self.has_shared_audio_route_risk(), |this| {
+                this.child(self.render_shared_route_risk_notice())
+            })
+    }
+
+    fn render_shared_route_risk_notice(&self) -> Div {
+        div()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(0x6b511f))
+            .bg(rgb(0x2d220f))
+            .px_2()
+            .py_2()
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_1()
+                    .child(ui_button_icon(
+                        IconName::Info,
+                        12.0,
+                        ButtonIconTone::Warning,
+                    ))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(0xf3c873))
+                            .whitespace_normal()
+                            .child("输入/输出同路由时，已强制开启 AEC。仍可能有残留回声，建议分离采集与播放设备。"),
+                    ),
+            )
     }
 
     fn render_meter_section(&self, is_connected: bool) -> Div {
