@@ -4,6 +4,8 @@ AI Meeting Host 是一个面向在线会议场景的桌面语音网关。
 
 它把“本机会议音频设备”与“AI 语音平台”连接起来，让 AI 能在会议中实时听、答、说。
 
+![AI Meeting Host 软演示界面](docs/soft-demo.png)
+
 ## 产品定位
 
 - 一个运行在本机的 Voice Gateway，而不是某个会议软件插件
