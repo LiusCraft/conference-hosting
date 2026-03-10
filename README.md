@@ -182,7 +182,6 @@ Windows 下执行 `cargo build -p host-app-gpui --release` 时，会通过 `buil
 - 生成 `AI-Meeting-Host-<tag>-macos.zip`（解压后直接得到 `AI Meeting Host.app`）
 - 上传 workflow artifact（内含 `AI Meeting Host.app`）
 - 发布 zip 到同名 GitHub Release（自动生成 Release Notes）
-- 同时将 zip 作为 OCI artifact 发布到 GitHub Packages：`ghcr.io/<owner>/ai-meeting-host-macos:<tag>`，并按 tag 渠道更新别名（包含 `pre` 的 tag 更新 `:pre`，其余更新 `:latest`）
 
 触发示例：
 

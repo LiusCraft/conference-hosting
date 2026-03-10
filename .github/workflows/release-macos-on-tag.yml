@@ -11,7 +11,6 @@ jobs:
     runs-on: macos-14
     permissions:
       contents: write
-      packages: write
 
     steps:
       - name: Checkout source
@@ -46,46 +45,6 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent \
             "apps/host-app-gpui/dist/AI Meeting Host.app" \
             "${ARCHIVE_PATH}"
-
-      - name: Install ORAS CLI
-        uses: oras-project/setup-oras@v1
-
-      - name: Login to GitHub Container Registry
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          printf '%s' "${GITHUB_TOKEN}" | oras login ghcr.io \
-            --username "${GITHUB_ACTOR}" \
-            --password-stdin
-
-      - name: Publish package to GitHub Packages
-        env:
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          OWNER="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          PACKAGE_BASE="ghcr.io/${OWNER}/ai-meeting-host-macos"
-          PACKAGE_REF_TAG="${PACKAGE_BASE}:${TAG_NAME}"
-          CHANNEL_TAG="latest"
-          if [[ "${TAG_NAME}" == *"pre"* ]]; then
-            CHANNEL_TAG="pre"
-          fi
-          PACKAGE_REF_CHANNEL="${PACKAGE_BASE}:${CHANNEL_TAG}"
-          ARCHIVE_PATH="release-artifacts/AI-Meeting-Host-${TAG_NAME}-macos.zip"
-
-          push_package() {
-            local ref="$1"
-            oras push "${ref}" \
-              --artifact-type application/vnd.ai-meeting-host.macos.zip \
-              --annotation "org.opencontainers.image.title=AI Meeting Host macOS" \
-              --annotation "org.opencontainers.image.version=${TAG_NAME}" \
-              --annotation "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
-              "${ARCHIVE_PATH}:application/zip"
-          }
-
-          push_package "${PACKAGE_REF_TAG}"
-          if [[ "${PACKAGE_REF_CHANNEL}" != "${PACKAGE_REF_TAG}" ]]; then
-            push_package "${PACKAGE_REF_CHANNEL}"
-          fi
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4

@@ -1,4 +1,4 @@
-import { ArrowDown, Cpu, Shield, Zap, Monitor } from "lucide-react"
+import { Apple, ArrowDown, Cpu, Shield, Zap, Monitor } from "lucide-react"
 import Link from "next/link"
 
 const highlights = [
@@ -6,6 +6,8 @@ const highlights = [
   { icon: Shield, label: "AEC3 可观测", desc: "stream delay / ERL / ERLE" },
   { icon: Cpu, label: "MCP 桥接", desc: "stdio / sse / stream" },
 ]
+
+const latestReleaseUrl = "https://github.com/LiusCraft/conference-hosting/releases/latest"
 
 export function HeroSection() {
   return (
@@ -35,6 +37,15 @@ export function HeroSection() {
         </p>
 
         <div className="mt-10 flex flex-col items-center gap-4 sm:flex-row">
+          <a
+            href={latestReleaseUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="flex items-center gap-2 rounded-lg border border-primary/40 bg-primary/10 px-6 py-3 text-sm font-medium text-primary transition-all hover:bg-primary/20"
+          >
+            <Apple size={16} />
+            下载 macOS 最新版
+          </a>
           <Link
             href="/mockup"
             className="flex items-center gap-2 rounded-lg bg-primary px-6 py-3 text-sm font-medium text-primary-foreground transition-all hover:bg-primary/90"
