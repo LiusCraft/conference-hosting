@@ -22,7 +22,16 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Install macOS native dependencies
+        run: |
+          command -v pkg-config >/dev/null 2>&1 || brew install pkgconf
+          brew list opus >/dev/null 2>&1 || brew install opus
+          OPUS_PKGCONFIG_DIR="$(brew --prefix opus)/lib/pkgconfig"
+          echo "PKG_CONFIG_PATH=${OPUS_PKGCONFIG_DIR}:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+
       - name: Package app bundle
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
         run: |
           TAG="${GITHUB_REF_NAME}"
           VERSION="${TAG#v}"
