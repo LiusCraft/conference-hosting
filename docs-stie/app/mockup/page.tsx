@@ -32,7 +32,7 @@ export default function MockupPage() {
           </h1>
           <p className="text-sm text-muted-foreground text-center max-w-md text-pretty leading-relaxed">
             Rust + GPUI 桌面应用界面原型 -- 已对齐当前实现能力，
-            包含 AEC3 指标与 MCP 工具桥接场景
+            包含 MCP Server 管理、AEC 开关和语音模式切换
           </p>
         </div>
       </div>
@@ -52,7 +52,7 @@ export default function MockupPage() {
           <span>MCP bridge</span>
         </div>
         <p className="text-[10px] text-muted-foreground/40">
-          交互式 UI 原型 -- 可点击侧边栏控件、设备选择器和连接按钮体验完整交互
+          交互式 UI 原型 -- 可点击侧边栏控件、MCP 管理按钮、AEC 与语音模式切换体验完整交互
         </p>
       </div>
     </main>
