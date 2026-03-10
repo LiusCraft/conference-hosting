@@ -27,6 +27,58 @@ AI Meeting Host 是一个面向在线会议场景的桌面语音网关。
 3. 通过语音上行 + 文本/工具事件观察 AI 会话过程。
 4. 在设置页管理 MCP Servers，扩展 AI 可调用工具。
 
+## 当前软件时序图
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor User as 用户
+  participant UI as Host App(GPUI)
+  participant CFG as Local Config
+  participant MCP as MCP Aggregator
+  participant TOOL as MCP Servers
+  participant WS as WS Client(host-platform)
+  participant AI as AI Voice Platform
+  participant AUDIO as Audio Pipeline
+
+  User->>UI: 启动应用
+  UI->>CFG: 读取 settings.json
+  CFG-->>UI: 返回 WS/音频/MCP 配置
+  UI->>MCP: 初始化已启用服务
+  MCP->>TOOL: initialize + tools/list
+  TOOL-->>MCP: capabilities/tools
+  MCP-->>UI: 聚合工具可用状态
+
+  User->>UI: 点击连接
+  UI->>WS: 建立 WebSocket（携带认证 Header）
+  WS->>AI: 发送 hello(features.mcp=true)
+  AI-->>WS: hello/ready
+  WS-->>UI: 状态=CONNECTED
+  UI->>WS: listen start
+
+  loop 每 20ms 音频上行
+    AUDIO->>WS: PCM 分帧并编码 Opus
+    WS->>AI: Binary audio frame
+  end
+
+  AI-->>WS: stt/llm/intent_trace 事件
+  WS-->>UI: 刷新会话面板
+  AI-->>WS: Opus 下行音频
+  WS->>AUDIO: 解码并播放到输出设备
+
+  opt 平台触发工具调用
+    AI->>WS: mcp.tools/call(name,args)
+    WS->>MCP: 路由到目标服务
+    MCP->>TOOL: tools/call
+    TOOL-->>MCP: result/error
+    MCP-->>WS: JSON-RPC 响应
+    WS-->>AI: mcp result/error
+  end
+
+  User->>UI: 点击断开
+  UI->>WS: listen stop + close
+```
+
 ## 快速开始
 
 ```bash
