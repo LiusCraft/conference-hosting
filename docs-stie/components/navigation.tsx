@@ -6,6 +6,7 @@ import Link from "next/link"
 
 const navLinks = [
   { label: "架构概览", href: "#architecture" },
+  { label: "协议兼容", href: "#protocol" },
   { label: "核心功能", href: "#features" },
   { label: "跨平台策略", href: "#platform" },
   { label: "性能优化", href: "#performance" },
@@ -64,12 +65,20 @@ export function Navigation() {
             UI 原型
           </Link>
           <a
-            href="https://github.com"
+            href="https://github.com/LiusCraft/conference-hosting"
             target="_blank"
             rel="noreferrer"
             className="rounded-md px-3 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
           >
-            GitHub
+            GitHub 仓库
+          </a>
+          <a
+            href="https://linx.qiniu.com/"
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-md px-3 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground"
+          >
+            在线智能体
           </a>
           <a
             href="#roadmap"
@@ -110,6 +119,24 @@ export function Navigation() {
                 <Monitor size={14} />
                 查看 UI 原型
               </Link>
+              <a
+                href="https://github.com/LiusCraft/conference-hosting"
+                target="_blank"
+                rel="noreferrer"
+                className="block rounded-lg border border-border bg-secondary px-4 py-2.5 text-center text-sm font-medium text-foreground"
+                onClick={() => setMobileOpen(false)}
+              >
+                GitHub 仓库
+              </a>
+              <a
+                href="https://linx.qiniu.com/"
+                target="_blank"
+                rel="noreferrer"
+                className="block rounded-lg border border-border bg-secondary px-4 py-2.5 text-center text-sm font-medium text-foreground"
+                onClick={() => setMobileOpen(false)}
+              >
+                获取在线智能体
+              </a>
               <a
                 href="#roadmap"
                 className="block rounded-lg bg-primary px-4 py-2.5 text-center text-sm font-medium text-primary-foreground"

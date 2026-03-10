@@ -20,6 +20,12 @@ AI Meeting Host 是一个面向在线会议场景的桌面语音网关。
 - MCP 集成：支持 `stdio/sse/stream` 三种 server，支持探测、tools 刷新与路由调用
 - 本地持久化：WS 配置、UI 偏好、MCP 列表自动保存并恢复
 
+## 协议兼容说明
+
+- 当前软件默认接入灵矽平台（`https://linx.qiniu.com/`）对应的 WebSocket 协议族（实际服务地址可通过 `HOST_WS_URL` 覆盖）
+- 该协议在 xiaozhi WebSocket 协议基础上做了增强，扩展了部分能力字段与事件语义（如 `features.mcp`、`intent_trace`）
+- 同时保持与 `xiaozhi-server` 开源版本协议兼容，`hello/listen/音频帧` 主链路可直接互通
+
 ## 典型使用方式
 
 1. 配置 WS 地址和认证信息，连接 AI 语音平台。

@@ -54,6 +54,7 @@ export function Footer() {
             <div className="flex flex-col gap-2">
               {[
                 { label: "系统架构", href: "#architecture" },
+                { label: "协议兼容", href: "#protocol" },
                 { label: "核心功能", href: "#features" },
                 { label: "跨平台策略", href: "#platform" },
                 { label: "性能优化", href: "#performance" },
@@ -74,6 +75,22 @@ export function Footer() {
               >
                 桌面应用 UI 原型
               </Link>
+              <a
+                href="https://github.com/LiusCraft/conference-hosting"
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs text-primary transition-colors hover:text-primary/80"
+              >
+                GitHub 仓库
+              </a>
+              <a
+                href="https://linx.qiniu.com/"
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs text-primary transition-colors hover:text-primary/80"
+              >
+                获取在线智能体接入
+              </a>
             </div>
           </div>
         </div>

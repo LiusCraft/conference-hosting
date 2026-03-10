@@ -1,6 +1,7 @@
 import { Navigation } from "@/components/navigation"
 import { HeroSection } from "@/components/hero-section"
 import { ArchitectureSection } from "@/components/architecture-section"
+import { ProtocolSection } from "@/components/protocol-section"
 import { FeaturesSection } from "@/components/features-section"
 import { DesignPrinciplesSection } from "@/components/design-principles-section"
 import { PlatformSection } from "@/components/platform-section"
@@ -15,6 +16,7 @@ export default function Page() {
       <Navigation />
       <HeroSection />
       <ArchitectureSection />
+      <ProtocolSection />
       <FeaturesSection />
       <DesignPrinciplesSection />
       <PlatformSection />
