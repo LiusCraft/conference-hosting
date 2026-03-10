@@ -9,11 +9,13 @@ use gpui_component::input::{InputEvent, InputState};
 use host_core::{GatewayStatus, ListenMode};
 use tokio::sync::mpsc;
 
-use crate::app::config::{build_gateway_config, default_device_mac, env_or_default};
+use crate::app::config::{
+    build_gateway_config, default_client_id, default_device_mac, env_or_default,
+};
 use crate::app::persistence::load_persisted_app_settings;
 use crate::app::state::{
     ChatMessage, ChatRole, ConnectionState, GatewayCommand, UiGatewayEvent, APP_TITLE,
-    DEFAULT_CLIENT_ID, DEFAULT_TOKEN, DEFAULT_WS_URL,
+    DEFAULT_TOKEN, DEFAULT_WS_URL,
 };
 use crate::components::icon::{icon, IconName};
 use crate::features::audio::{
@@ -136,7 +138,7 @@ impl MeetingHostShell {
         );
         let initial_client_id = prefer_non_empty(
             &persisted_settings.ws.client_id,
-            env_or_default("HOST_CLIENT_ID", DEFAULT_CLIENT_ID),
+            env_or_default("HOST_CLIENT_ID", &default_client_id()),
         );
         let initial_auth_token = prefer_non_empty(
             &persisted_settings.ws.auth_token,

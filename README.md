@@ -42,7 +42,7 @@ Windows 下执行 `cargo build -p host-app-gpui --release` 时，会通过 `buil
 - `HOST_WS_URL`（默认值见 `apps/host-app-gpui/src/app/state.rs` 的 `DEFAULT_WS_URL`，当前为 `wss://xrobo-io.qiniuapi.com/v1/ws/`）
 - `HOST_DEVICE_ID` / `HOST_DEVICE_MAC`
 - `HOST_DEVICE_NAME`
-- `HOST_CLIENT_ID`
+- `HOST_CLIENT_ID`（未设置时默认生成 32 位无符号 UUID）
 - `HOST_TOKEN`
 - `HOST_INPUT_DEVICE`（可选，输入设备名或关键字）
 - `HOST_OUTPUT_DEVICE`（可选，输出设备名或关键字）

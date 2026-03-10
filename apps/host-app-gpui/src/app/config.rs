@@ -1,7 +1,8 @@
 use host_platform::WsGatewayConfig;
 use mac_address::get_mac_address;
+use uuid::Uuid;
 
-use crate::app::state::{DEFAULT_CLIENT_ID, DEFAULT_TOKEN, DEFAULT_WS_URL};
+use crate::app::state::{DEFAULT_TOKEN, DEFAULT_WS_URL};
 
 const DEFAULT_DEVICE_MAC_FALLBACK: &str = "unknown-device";
 const DEFAULT_DEVICE_NAME_FALLBACK: &str = "host-user";
@@ -15,8 +16,9 @@ pub(crate) fn build_gateway_config(
 ) -> WsGatewayConfig {
     let device_mac = env_or_default("HOST_DEVICE_MAC", &default_device_mac());
     let device_id = resolve_override_or_env(device_id_override, "HOST_DEVICE_ID", &device_mac);
+    let generated_client_id = default_client_id();
     let client_id =
-        resolve_override_or_env(client_id_override, "HOST_CLIENT_ID", DEFAULT_CLIENT_ID);
+        resolve_override_or_env(client_id_override, "HOST_CLIENT_ID", &generated_client_id);
     let token = resolve_override_or_env(token_override, "HOST_TOKEN", DEFAULT_TOKEN);
     let server_url = resolve_override_or_env(server_url_override, "HOST_WS_URL", DEFAULT_WS_URL);
     let device_name = env_or_default("HOST_DEVICE_NAME", &default_device_name());
@@ -58,6 +60,10 @@ pub(crate) fn default_device_name() -> String {
         .unwrap_or_else(|| DEFAULT_DEVICE_NAME_FALLBACK.to_string())
 }
 
+pub(crate) fn default_client_id() -> String {
+    Uuid::new_v4().simple().to_string()
+}
+
 fn resolve_override_or_env(override_value: Option<&str>, env_key: &str, fallback: &str) -> String {
     override_value
         .map(str::trim)
@@ -72,4 +78,17 @@ pub(crate) fn env_or_default(key: &str, fallback: &str) -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| fallback.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_client_id;
+
+    #[test]
+    fn default_client_id_is_alphanumeric_uuid_without_symbols() {
+        let client_id = default_client_id();
+
+        assert_eq!(client_id.len(), 32);
+        assert!(client_id.chars().all(|ch| ch.is_ascii_alphanumeric()));
+    }
 }
