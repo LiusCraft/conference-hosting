@@ -14,6 +14,7 @@ APP_NAME="${APP_NAME:-AI Meeting Host}"
 APP_VERSION="${APP_VERSION:-0.1.0}"
 APP_BUILD_NUMBER="${APP_BUILD_NUMBER:-$APP_VERSION}"
 BUNDLE_IDENTIFIER="${BUNDLE_IDENTIFIER:-com.liuscraft.ai-meeting-host}"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 
 BUNDLE_DIR="$DIST_DIR/$APP_NAME.app"
 CONTENTS_DIR="$BUNDLE_DIR/Contents"
@@ -62,6 +63,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<EOF
   <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
   <string>$APP_BUILD_NUMBER</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>AI Meeting Host needs microphone access to capture meeting audio.</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
   <key>NSHighResolutionCapable</key>
@@ -69,5 +72,13 @@ cat > "$CONTENTS_DIR/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
+
+codesign --force --deep --sign "$CODESIGN_IDENTITY" "$BUNDLE_DIR"
+codesign --verify --deep --strict --verbose=2 "$BUNDLE_DIR"
+
+printf 'Signed app bundle with identity: %s\n' "$CODESIGN_IDENTITY"
+if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
+  printf 'Note: ad-hoc signature is used; notarization is still required for smooth Gatekeeper launch on other Macs.\n'
+fi
 
 printf 'Created app bundle: %s\n' "$BUNDLE_DIR"

@@ -152,6 +152,21 @@ bash apps/host-app-gpui/scripts/package_macos_app.sh
 
 输出路径：`apps/host-app-gpui/dist/AI Meeting Host.app`
 
+默认会对 `.app` 做 ad-hoc 签名（修复 Finder 报 "is damaged" 的签名校验问题）。
+如果你有 Apple Developer ID 证书，可在打包时指定：
+
+```bash
+CODESIGN_IDENTITY="Developer ID Application: <Your Name> (<TEAM_ID>)" bash apps/host-app-gpui/scripts/package_macos_app.sh
+```
+
+注意：对外分发若希望用户双击即打开，仍需后续 notarization（公证）并 stapling。
+
+麦克风权限说明（macOS）：
+
+- `.app` 的 `Info.plist` 已包含 `NSMicrophoneUsageDescription`
+- 当用户拒绝麦克风权限时，应用会在启动采集时给出提示，并自动尝试打开
+  `系统设置 > 隐私与安全性 > 麦克风`
+
 Windows 下执行 `cargo build -p host-app-gpui --release` 时，会通过 `build.rs`
 将 `assets/icons/app-taskbar-logo.ico` 嵌入 exe 资源（任务栏图标）。
 
@@ -162,8 +177,8 @@ Windows 下执行 `cargo build -p host-app-gpui --release` 时，会通过 `buil
 当 tag 被 push 到远端后，会自动：
 
 - 在 `macos-14` runner 上构建并打包 `AI Meeting Host.app`
-- 生成 `AI-Meeting-Host-<tag>-macos.zip` 和同名 `.sha256` 校验文件
-- 上传 workflow artifact，并发布到同名 GitHub Release（自动生成 Release Notes）
+- 生成 `AI-Meeting-Host-<tag>-macos.zip`（解压后直接得到 `AI Meeting Host.app`）
+- 上传 workflow artifact（内含 `AI Meeting Host.app`），并发布 zip 到同名 GitHub Release（自动生成 Release Notes）
 
 触发示例：
 

@@ -41,16 +41,16 @@ jobs:
         run: |
           mkdir -p release-artifacts
           ARCHIVE_NAME="AI-Meeting-Host-${GITHUB_REF_NAME}-macos.zip"
+          ARCHIVE_PATH="release-artifacts/${ARCHIVE_NAME}"
           ditto -c -k --sequesterRsrc --keepParent \
             "apps/host-app-gpui/dist/AI Meeting Host.app" \
-            "release-artifacts/${ARCHIVE_NAME}"
-          shasum -a 256 "release-artifacts/${ARCHIVE_NAME}" > "release-artifacts/${ARCHIVE_NAME}.sha256"
+            "${ARCHIVE_PATH}"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: AI-Meeting-Host-${{ github.ref_name }}-macos
-          path: release-artifacts/*
+          name: AI-Meeting-Host-${{ github.ref_name }}-macos-app
+          path: apps/host-app-gpui/dist/AI Meeting Host.app
           if-no-files-found: error
 
       - name: Publish release assets
@@ -58,5 +58,4 @@ jobs:
         with:
           files: |
             release-artifacts/AI-Meeting-Host-${{ github.ref_name }}-macos.zip
-            release-artifacts/AI-Meeting-Host-${{ github.ref_name }}-macos.zip.sha256
           generate_release_notes: true

@@ -3,6 +3,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "macos")]
+use std::process::Command;
+
 use aec3::voip::VoipAec3;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
@@ -1676,6 +1679,8 @@ fn start_microphone_capture(
     input_from_output_loopback: bool,
     echo_canceller: Option<SharedEchoCanceller>,
 ) -> Result<(MicrophoneCapture, mpsc::Receiver<Vec<u8>>), String> {
+    check_microphone_permission_before_capture()?;
+
     let host = cpal::default_host();
     let device = select_input_device(&host, input_device_hint, input_from_output_loopback)?;
 
@@ -1765,11 +1770,13 @@ fn start_microphone_capture(
             ));
         }
     }
-    .map_err(|error| format!("Failed to build microphone input stream: {error}"))?;
+    .map_err(|error| {
+        enrich_microphone_capture_error(format!("Failed to build microphone input stream: {error}"))
+    })?;
 
-    stream
-        .play()
-        .map_err(|error| format!("Failed to start microphone input stream: {error}"))?;
+    stream.play().map_err(|error| {
+        enrich_microphone_capture_error(format!("Failed to start microphone input stream: {error}"))
+    })?;
 
     let description = format!(
         "{} | {:?}, {}ch @ {}Hz -> {}Hz mono opus",
@@ -1777,6 +1784,94 @@ fn start_microphone_capture(
     );
 
     Ok((MicrophoneCapture::new(stream, description), frame_rx))
+}
+
+fn enrich_microphone_capture_error(base_error: String) -> String {
+    if let Err(permission_error) = check_microphone_permission_before_capture() {
+        return permission_error;
+    }
+
+    base_error
+}
+
+fn check_microphone_permission_before_capture() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        match macos_microphone_permission_status() {
+            Some(MacosMicrophonePermissionStatus::Denied)
+            | Some(MacosMicrophonePermissionStatus::Restricted) => {
+                let opened = open_macos_microphone_privacy_settings();
+                if opened {
+                    Err("麦克风权限未开启，已尝试打开系统设置 > 隐私与安全性 > 麦克风，请允许 AI Meeting Host 后重试。".to_string())
+                } else {
+                    Err("麦克风权限未开启，请在系统设置 > 隐私与安全性 > 麦克风中允许 AI Meeting Host 后重试。".to_string())
+                }
+            }
+            _ => Ok(()),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MacosMicrophonePermissionStatus {
+    NotDetermined,
+    Restricted,
+    Denied,
+    Authorized,
+    Unknown,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_microphone_permission_status() -> Option<MacosMicrophonePermissionStatus> {
+    let output = Command::new("osascript")
+        .args([
+            "-l",
+            "AppleScript",
+            "-e",
+            "use framework \"AVFoundation\"",
+            "-e",
+            "set micStatus to current application's AVCaptureDevice's authorizationStatusForMediaType:(current application's AVMediaTypeAudio)",
+            "-e",
+            "return micStatus as integer",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let raw_status = String::from_utf8_lossy(&output.stdout);
+    let status = raw_status.trim().parse::<i32>().ok()?;
+
+    Some(match status {
+        0 => MacosMicrophonePermissionStatus::NotDetermined,
+        1 => MacosMicrophonePermissionStatus::Restricted,
+        2 => MacosMicrophonePermissionStatus::Denied,
+        3 => MacosMicrophonePermissionStatus::Authorized,
+        _ => MacosMicrophonePermissionStatus::Unknown,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn open_macos_microphone_privacy_settings() -> bool {
+    [
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
+        "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Microphone",
+    ]
+    .iter()
+    .any(|url| {
+        Command::new("open")
+            .arg(url)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    })
 }
 
 fn list_input_device_names(host: &cpal::Host) -> Vec<String> {
