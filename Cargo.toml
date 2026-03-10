@@ -17,11 +17,12 @@ cpal = "0.15.3"
 gpui = "0.2.2"
 gpui-component = "0.5.1"
 futures-util = "0.3.31"
+mac_address = "1.1.8"
 opus = "0.3.1"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 thiserror = "2.0.12"
 tokio = { version = "1.44.1", features = ["io-std", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
-tokio-tungstenite = { version = "0.26.2", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.26.2", features = ["rustls-tls-native-roots", "rustls-tls-webpki-roots"] }
 url = "2.5.4"
 rmcp = { version = "1.1.0", default-features = false, features = ["client", "reqwest", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }

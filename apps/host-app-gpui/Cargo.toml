@@ -13,6 +13,7 @@ gpui.workspace = true
 gpui-component.workspace = true
 host-core = { path = "../../crates/host-core" }
 host-platform = { path = "../../crates/host-platform" }
+mac_address.workspace = true
 opus.workspace = true
 serde.workspace = true
 serde_json.workspace = true

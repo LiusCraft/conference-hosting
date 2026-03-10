@@ -39,7 +39,7 @@ Windows 下执行 `cargo build -p host-app-gpui --release` 时，会通过 `buil
 
 可选环境变量（用于 GPUI 联调连接参数覆盖）：
 
-- `HOST_WS_URL`（默认值见 `apps/host-app-gpui/src/main.rs` 的 `DEFAULT_WS_URL`）
+- `HOST_WS_URL`（默认值见 `apps/host-app-gpui/src/app/state.rs` 的 `DEFAULT_WS_URL`，当前为 `wss://xrobo-io.qiniuapi.com/v1/ws/`）
 - `HOST_DEVICE_ID` / `HOST_DEVICE_MAC`
 - `HOST_DEVICE_NAME`
 - `HOST_CLIENT_ID`

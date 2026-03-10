@@ -734,6 +734,27 @@ mod tests {
     }
 
     #[test]
+    fn websocket_url_preserves_wss_scheme() {
+        let config = WsGatewayConfig::new(
+            "wss://xrobo-io.qiniuapi.com/v1/ws/?foo=bar",
+            "new-device",
+            "Host Desktop",
+            "AA:BB:CC:DD:EE:FF",
+            "new-client",
+            "token-demo",
+        );
+
+        let url = config.websocket_url().expect("build websocket url");
+        assert_eq!(url.scheme(), "wss");
+        assert_eq!(url.host_str(), Some("xrobo-io.qiniuapi.com"));
+
+        let query_pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+        assert!(query_pairs.contains(&("foo".to_string(), "bar".to_string())));
+        assert!(query_pairs.contains(&("device-id".to_string(), "new-device".to_string())));
+        assert!(query_pairs.contains(&("client-id".to_string(), "new-client".to_string())));
+    }
+
+    #[test]
     fn hello_message_can_disable_mcp_feature_flag() {
         let config = WsGatewayConfig::new(
             "ws://127.0.0.1:8000/xiaozhi/v1/",
