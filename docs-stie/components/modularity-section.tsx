@@ -2,13 +2,13 @@ const modules = [
   {
     name: "host-core",
     path: "crates/host-core",
-    desc: "纯 Rust 核心业务逻辑库，不依赖任何平台或 UI 框架",
+    desc: "核心协议与领域模型层，不依赖具体平台和 UI",
     responsibilities: [
-      "WebSocket 协议抽象（hello 握手、listen 控制、帧收发）",
-      "音频帧切分与队列管理",
-      "Opus 编解码封装",
-      "VAD 语音活动检测集成",
-      "会话状态机管理",
+      "`hello` / `listen` / `mcp` 文本协议模型",
+      "JSON-RPC 请求/响应结构定义",
+      "16kHz/20ms/mono 音频帧常量",
+      "Gateway 状态与基础枚举类型",
+      "协议序列化测试",
     ],
     color: "border-primary/30 bg-primary/5",
     tagColor: "bg-primary/15 text-primary",
@@ -16,13 +16,13 @@ const modules = [
   {
     name: "host-platform",
     path: "crates/host-platform",
-    desc: "平台适配层，隔离不同操作系统的音频设备和虚拟麦克风差异",
+    desc: "WebSocket 传输适配层，承载连接与事件流",
     responsibilities: [
-      "cpal 音频设备枚举与配置",
-      "平台特定的 Loopback 回采实现",
-      "虚拟麦克风设备发现与输出",
-      "音频镜像（监听）管线",
-      "条件编译 #[cfg(target_os)] 平台分支",
+      "URL/header 组装（Authorization/device-id/client-id）",
+      "hello 握手等待与超时控制",
+      "文本/二进制/pong 事件分发",
+      "listen/mcp/jsonrpc 发送封装",
+      "WS 主链路集成测试",
     ],
     color: "border-chart-2/30 bg-chart-2/5",
     tagColor: "bg-chart-2/15 text-chart-2",
@@ -30,13 +30,13 @@ const modules = [
   {
     name: "host-app-gpui",
     path: "apps/host-app-gpui",
-    desc: "GPUI 桌面应用层，负责 UI 渲染与用户交互",
+    desc: "桌面应用层，串联 UI、音频运行时与 MCP 网桥",
     responsibilities: [
-      "GPUI 窗口与组件树",
-      "聊天式消息展示界面",
-      "输入/输出设备选择 UI",
-      "BlackHole 快捷切换",
-      "音频状态实时指示",
+      "GPUI 窗口、侧栏、聊天面板、设置面板",
+      "cpal 采集/播放 + Opus 编解码 + AEC3 指标",
+      "MCP server 管理页与本地探测",
+      "MCP JSON-RPC 路由（initialize/tools/list/tools/call）",
+      "本地 settings.json 持久化与脱敏展示",
     ],
     color: "border-chart-4/30 bg-chart-4/5",
     tagColor: "bg-chart-4/15 text-chart-4",
@@ -73,19 +73,22 @@ export function ModularitySection() {
           <pre className="overflow-x-auto font-mono text-xs leading-6 text-muted-foreground">
             <code>{`[workspace]
 members = [
-    "crates/host-core",       # 核心业务逻辑
-    "crates/host-platform",   # 平台适配层
+    "crates/host-core",       # 协议与模型
+    "crates/host-platform",   # WS 适配层
     "apps/host-app-gpui",     # GPUI 桌面应用
 ]
 
 [workspace.dependencies]
-tokio       = { version = "1", features = ["full"] }
-tungstenite = "0.24"
-cpal        = "0.15"
-opus        = "0.3"
-rubato      = "0.14"
-webrtc-vad  = "0.4"
-tracing     = "0.1"`}</code>
+tokio              = "1.44"
+tokio-tungstenite  = "0.26"
+rustls             = "0.23"
+cpal               = "0.15"
+opus               = "0.3"
+aec3               = "0.1"
+gpui               = "0.2"
+gpui-component     = "0.5"
+rmcp               = "1.1"
+serde/serde_json   = "1.0"`}</code>
           </pre>
         </div>
 
@@ -127,21 +130,25 @@ tracing     = "0.1"`}</code>
         {/* Dependency flow */}
         <div className="mt-10 flex flex-col items-center gap-2 text-xs text-muted-foreground">
           <p className="font-medium text-foreground">依赖方向</p>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-col items-center gap-2">
             <span className="rounded-md bg-chart-4/15 px-2 py-1 font-mono text-chart-4">
               host-app-gpui
             </span>
-            <span>{"-->"}</span>
-            <span className="rounded-md bg-chart-2/15 px-2 py-1 font-mono text-chart-2">
-              host-platform
-            </span>
-            <span>{"-->"}</span>
-            <span className="rounded-md bg-primary/15 px-2 py-1 font-mono text-primary">
-              host-core
-            </span>
+            <div className="flex items-center gap-2">
+              <span>{"-->"}</span>
+              <span className="rounded-md bg-chart-2/15 px-2 py-1 font-mono text-chart-2">
+                host-platform
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span>{"-->"}</span>
+              <span className="rounded-md bg-primary/15 px-2 py-1 font-mono text-primary">
+                host-core
+              </span>
+            </div>
           </div>
           <p className="mt-1 text-muted-foreground/60">
-            上层依赖下层，下层不感知上层实现
+            host-app-gpui 同时依赖 host-platform 与 host-core
           </p>
         </div>
       </div>

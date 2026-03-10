@@ -33,7 +33,7 @@ export function StatusBar({ connected }: StatusBarProps) {
         {connected && (
           <span className="flex items-center gap-1 text-primary">
             <Zap className="w-3 h-3" />
-            延迟 ~700ms (采集 20ms + 网络 50ms + ASR 200ms + LLM 300ms + TTS 130ms)
+            RTT 48ms | AEC 118ms | 20ms 帧
           </span>
         )}
       </div>

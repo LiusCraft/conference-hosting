@@ -5,54 +5,54 @@ const strategies = [
     icon: Paintbrush,
     title: "GPUI 原生 GPU 渲染",
     points: [
-      "所有 UI 元素通过 Metal (macOS) / DirectX / Vulkan 直接绘制到 GPU",
-      "不依赖 WebView 或 DOM，渲染路径极短，帧率稳定在 60fps+",
-      "文本布局、阴影、动画全部在 GPU Shader 中完成",
+      "桌面端 UI 使用 GPUI 渲染，不依赖 WebView",
+      "音频高频事件在 UI 侧做节流刷新，降低重绘压力",
+      "连接状态、RTT、AEC 指标与消息面板可并行更新",
     ],
   },
   {
     icon: Bolt,
     title: "Tokio 异步运行时",
     points: [
-      "WebSocket 收发、音频处理、UI 更新运行在独立异步任务中",
-      "零阻塞 I/O 模型，音频帧不会因网络抖动而丢帧",
-      "利用 Rust async/await 自然表达并发，编译器保障无数据竞争",
+      "网关运行在独立 worker 线程中，内部持有 Tokio runtime",
+      "命令通道与事件通道解耦 UI 与网络/音频任务",
+      "WebSocket 文本、二进制、pong 事件分别处理，互不阻塞",
     ],
   },
   {
     icon: MemoryStick,
-    title: "零拷贝音频管线",
+    title: "固定帧音频管线",
     points: [
-      "音频缓冲区在采集、编码、发送之间通过引用传递，避免冗余复制",
-      "Ring Buffer 环形缓冲设计，最小化内存分配和 GC 压力（Rust 无 GC）",
-      "20ms 分帧按固定大小预分配，运行时零 allocation",
+      "上行统一 20ms/16kHz/mono 口径，便于链路稳定与调试",
+      "Opus 编码使用固定码率与复杂度，降低抖动",
+      "下行解码后按输出采样率重建播放缓冲并限长保护",
     ],
   },
   {
     icon: Gauge,
-    title: "低延迟优先调度",
+    title: "AEC3 动态延迟校准",
     points: [
-      "音频回调线程设置为实时优先级，确保采集/播放不被其他任务抢占",
-      "WebSocket 心跳与音频帧发送解耦，互不阻塞",
-      "TTS 下行流式解码，边接收边播放，不等待完整音频",
+      "采集与播放回调延迟、播放缓冲延迟持续采样",
+      "按平滑策略更新 stream delay，减少回声残留与抖动",
+      "支持运行时开关与共享路由强制开启策略",
     ],
   },
   {
     icon: Layers,
-    title: "分层缓冲策略",
+    title: "可降级的容错策略",
     points: [
-      "上行：20ms 帧立即编码推送，无额外缓冲",
-      "下行：自适应 jitter buffer 吸收网络抖动",
-      "播放：双缓冲交替写入/播放，消除音频断裂",
+      "上行帧队列满时触发丢包告警，避免阻塞主循环",
+      "hello 握手、MCP 连接、MCP 调用均有超时边界",
+      "单个 MCP server 异常时返回可用子集，不中断主链路",
     ],
   },
   {
     icon: Cpu,
-    title: "编译期优化",
+    title: "运行态可观测",
     points: [
-      "Rust 编译器 LLVM 后端深度优化，Release 构建自动内联关键路径",
-      "泛型单态化确保音频处理函数无虚函数开销",
-      "cargo-bundle 生成平台原生安装包，无运行时解释层",
+      "状态栏展示会话时长、上下行速率、RTT 与响应延迟",
+      "设置面板展示 AEC stream delay/ERL/ERLE 等关键指标",
+      "敏感字段在展示前统一脱敏，提升调试与安全平衡",
     ],
   },
 ]
@@ -66,11 +66,11 @@ export function PerformanceSection() {
             性能优化
           </p>
           <h2 className="text-3xl font-bold tracking-tight text-foreground md:text-4xl">
-            GPU 渲染 + Rust 并发
+            实时性与稳定性并重
           </h2>
           <p className="mt-4 text-lg leading-relaxed text-muted-foreground">
-            充分利用 Rust 的零成本抽象与 GPUI 的 GPU 直接渲染能力，
-            在保证内存安全的前提下达到接近系统级的性能表现。
+            当前实现重点放在链路稳定、延迟可观测和故障隔离，
+            所有结论均以已落地代码路径为依据。
           </p>
         </div>
 

@@ -31,8 +31,8 @@ export default function MockupPage() {
             AI Meeting Host
           </h1>
           <p className="text-sm text-muted-foreground text-center max-w-md text-pretty leading-relaxed">
-            Rust + GPUI 桌面应用界面原型 -- 实时音频网关，
-            连接在线会议与 AI 语音平台
+            Rust + GPUI 桌面应用界面原型 -- 已对齐当前实现能力，
+            包含 AEC3 指标与 MCP 工具桥接场景
           </p>
         </div>
       </div>
@@ -47,9 +47,9 @@ export default function MockupPage() {
           <span className="w-1 h-1 rounded-full bg-border" />
           <span>Tokio async</span>
           <span className="w-1 h-1 rounded-full bg-border" />
-          <span>cpal + Opus</span>
+          <span>cpal + Opus + AEC3</span>
           <span className="w-1 h-1 rounded-full bg-border" />
-          <span>macOS / Windows / Linux</span>
+          <span>MCP bridge</span>
         </div>
         <p className="text-[10px] text-muted-foreground/40">
           交互式 UI 原型 -- 可点击侧边栏控件、设备选择器和连接按钮体验完整交互

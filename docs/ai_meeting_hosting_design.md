@@ -278,20 +278,20 @@ Virtual Microphone
 
 ------------------------------------------------------------------------
 
-# 十三、技术选型（定稿）
+# 十三、技术选型（当前实现对齐）
 
 ## 选型结论
 
-采用 **Rust + GPUI** 作为固定实现方案。
+采用 **Rust + GPUI** 作为固定实现方案，且已进入可运行实现阶段。
 
-- 核心引擎：Rust（低延迟音频处理、稳定的并发模型、内存安全）
-- 桌面端：GPUI（Rust 原生桌面 UI，渲染开销低，不依赖 WebView）
+- 核心引擎：Rust（低延迟音频链路、并发安全、可控内存占用）
+- 桌面端：GPUI + gpui-component（原生渲染，不依赖 WebView）
 - 工程组织：Cargo Workspace（`host-core` / `host-platform` / `host-app-gpui`）
-- 通信层：Tokio + tokio-tungstenite + rustls
-- 音频层：cpal（跨平台抽象）+ 平台适配（WASAPI/CoreAudio/PulseAudio）
-- 音频处理：rubato（重采样）、webrtc-vad（打断检测）
-- 可观测性：tracing + tracing-subscriber
-- 打包发布：cargo-bundle（后续补齐各平台签名/安装器流程）
+- 通信层：Tokio + tokio-tungstenite + rustls（含 hello 超时、ping/pong RTT）
+- 音频层：cpal（设备枚举/采集/播放）+ opus（上行编码/下行解码）
+- 回声消除：aec3（10ms capture/render 帧，动态 stream delay）
+- MCP 聚合：rmcp（`stdio` + streamable HTTP）
+- 配置存储：serde + 本地 JSON（默认 `~/.conference-hosting/host-app-gpui/settings.json`）
 
 ## 备选方案对比（简版）
 
@@ -302,35 +302,39 @@ Virtual Microphone
 
 ## 平台实现策略
 
-- Windows：WASAPI Loopback 采集 + VB-Cable 输出
-- macOS：CoreAudio 采集/播放 + BlackHole 虚拟设备
-- Linux：PulseAudio/PipeWire Monitor 采集 + 虚拟设备输出
+- Windows：WASAPI 设备链路 + VB-Cable/Virtual Audio Cable 路由
+- macOS：CoreAudio 设备链路 + BlackHole/Loopback 路由
+- Linux：PulseAudio/PipeWire 设备链路（功能已按抽象接入，联调与发布在后续阶段完善）
 
-## MVP实施边界
+## MVP 实施边界（更新）
 
-- 先实现主链路：采集 -> 20ms 分帧 -> WebSocket 双向流 -> TTS 播放到虚拟麦克风
-- 首批优先支持 macOS + Windows，Linux 在第二阶段补齐
-- AEC 先落地基础实时方案（AEC3，16kHz/mono，10ms 分块），后续再补齐更细粒度延迟估计与自动调参
+- 已实现主链路：采集 -> 20ms 分帧 -> Opus -> WebSocket 双向流 -> Opus 解码播放
+- 已实现会话辅助能力：设置面板、连接状态、RTT/AEC 指标、消息可视化
+- 已实现 MCP 基础闭环：管理配置 + `initialize/tools/list/tools/call`
+- 尚未完成的平台化项：一键虚拟麦克风自动路由、完整多平台签名分发流程
 
 ## 协议实现备注
 
 - 当前实现统一按 **20ms / 16kHz / mono / PCM16 = 320 samples / 640 bytes** 作为采集分帧口径
-- 传输层统一使用 WebSocket Binary + Opus 编解码，并在联调时以服务端协议版本为准
+- 传输层统一使用 WebSocket Binary + Opus 编解码，文本控制消息走 JSON
+- hello 默认声明 `features.notify.intent_trace=true` 与 `features.mcp=true`
 
 ------------------------------------------------------------------------
 
-# 十四、工程脚手架落地状态（2026-03-05）
+# 十四、工程落地状态（2026-03-11）
 
-- 已初始化 Cargo Workspace：`crates/host-core`、`crates/host-platform`、`apps/host-app-gpui`
-- 已提供 GPUI 最小可运行壳：`cargo run -p host-app-gpui`
-- 已在 `host-platform` 落地 WS 主链路基础实现：hello 握手、`listen` 控制、双向音频帧收发
-- 已在 `host-app-gpui` 落地消息可视化：WS 文本消息以聊天形式展示（含工具调用类文本事件）
-- 已在 `host-app-gpui` 支持文本输入（Enter 发送 `listen detect`）与 `cpal` 麦克风采集连续上行（20ms 分帧 Opus）
-- 已在 `host-app-gpui` 支持下行 Opus 解码并本地扬声器播放
-- 已在 `host-app-gpui` 支持输入/输出设备列表选择与 `BlackHole` 输出快捷切换（用于虚拟麦克风链路）
-- 已在 `host-app-gpui` 支持将输入源切换为输出回采（loopback）设备，用于采集会议软件下行声音
-- 已在 `host-app-gpui` 支持将所选输入源与输出源音频镜像到系统默认扬声器，便于本机监听
-- `host-app-gpui` 对下行音频二进制仅做统计，不转文本展示
-- 当前虚拟麦克风输出仍为下一阶段
-- 已在 `host-app-gpui` 接入 AEC3 实时回声消除：下行 Opus 解码样本作为 render 参考，麦克风上行在 10ms 帧上做 capture 消除，并基于采集/播放回调延迟动态更新 stream delay（可用 `HOST_ENABLE_AEC=0` 关闭）
-- 设置面板新增 AEC 开关与实时指标展示（应用流延迟、采集/播放回调延迟、播放缓冲延迟、ERL/ERLE）
+- 已完成 Workspace 与应用壳：`crates/host-core`、`crates/host-platform`、`apps/host-app-gpui`
+- `host-core` 已沉淀协议模型：`hello/listen/mcp`、JSON-RPC 封装、音频常量
+- `host-platform` 已实现 WS 客户端：header 注入、hello 握手校验、超时控制、事件流拆分
+- `host-app-gpui` 已实现连接工作线程：命令/事件双通道、自动 ping/pong RTT 采样
+- 已实现上行音频链路：设备采集 -> 单声道混音 -> 16k 对齐 -> Opus 编码 -> WS Binary 发送
+- 已实现下行音频链路：WS Binary 接收 -> Opus 解码 -> 目标输出设备播放
+- 已支持输入/输出设备选择、输出回采（loopback）作为输入、输入/输出镜像到系统扬声器
+- 已接入 AEC3：支持运行时开关、共享路由强制开启、实时指标（stream delay/callback delay/ERL/ERLE）
+- 已实现聊天面板事件聚合：STT/LLM/TTS 归并展示、intent_trace 折叠、响应延迟统计
+- 已实现 Listen Mode（manual/auto/realtime）并在连接态动态下发
+- 已实现 MCP Server 管理：新增/编辑/删除/启停、单个/全量刷新、探测状态与 tools 展示
+- 已实现 MCP 网桥：对平台响应 `initialize`、`tools/list`、`tools/call`，并按 `<alias>.<tool>` 路由到上游
+- 已实现敏感字段脱敏展示：`token`/`authorization`/`*_token` 日志与面板输出自动掩码
+- 已实现本地配置持久化（WS 参数、UI 偏好、MCP 列表）
+- 当前待补齐：自动化虚拟麦克风编排、VAD 打断策略、跨平台发布签名与安装器流程

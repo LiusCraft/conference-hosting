@@ -2,9 +2,9 @@ import { ArrowDown, Cpu, Shield, Zap, Monitor } from "lucide-react"
 import Link from "next/link"
 
 const highlights = [
-  { icon: Zap, label: "延迟 < 700ms", desc: "端到端实时语音处理" },
-  { icon: Shield, label: "内存安全", desc: "Rust 零成本抽象保障" },
-  { icon: Cpu, label: "GPU 渲染", desc: "GPUI 原生 GPU 加速 UI" },
+  { icon: Zap, label: "20ms 分帧", desc: "Opus 上下行链路已跑通" },
+  { icon: Shield, label: "AEC3 可观测", desc: "stream delay / ERL / ERLE" },
+  { icon: Cpu, label: "MCP 桥接", desc: "stdio / sse / stream" },
 ]
 
 export function HeroSection() {
@@ -26,12 +26,12 @@ export function HeroSection() {
         <h1 className="text-balance text-4xl font-bold leading-tight tracking-tight text-foreground md:text-6xl lg:text-7xl">
           AI 会议托管工具
           <br />
-          <span className="text-primary">产品原型概念</span>
+          <span className="text-primary">Rust 实现快照</span>
         </h1>
 
         <p className="mt-6 max-w-2xl text-pretty text-lg leading-relaxed text-muted-foreground md:text-xl">
-          基于 Rust 构建的高性能会议 AI 语音网关，采用 GPUI 原生 GPU 渲染引擎，
-          实现会议音频实时采集、AI 语音交互与虚拟麦克风输出的无缝桥接。
+          当前版本已落地 Cargo Workspace 三层结构与可运行桌面端，
+          包含 WebSocket 握手、音频双向流、AEC3 实时回声消除、MCP tools 桥接与本地配置持久化。
         </p>
 
         <div className="mt-10 flex flex-col items-center gap-4 sm:flex-row">

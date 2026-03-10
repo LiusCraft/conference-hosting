@@ -21,11 +21,11 @@ const platforms: {
     id: "macos",
     icon: Apple,
     name: "macOS",
-    status: "优先支持",
+    status: "已验证",
     statusColor: "text-primary",
-    audioCapture: "CoreAudio + BlackHole Loopback",
-    audioOutput: "CoreAudio 默认输出设备",
-    virtualMic: "BlackHole 2ch / Loopback",
+    audioCapture: "CoreAudio (cpal) + loopback 输入选择",
+    audioOutput: "默认输出或 BlackHole 等虚拟设备",
+    virtualMic: "通过输出设备路由到 BlackHole/Loopback",
     uiEngine: "GPUI Metal 后端渲染",
     priority: "MVP 阶段",
   },
@@ -33,36 +33,38 @@ const platforms: {
     id: "windows",
     icon: Monitor,
     name: "Windows",
-    status: "第一阶段",
+    status: "已适配",
     statusColor: "text-chart-2",
-    audioCapture: "WASAPI Loopback 系统回采",
-    audioOutput: "WASAPI 排他/共享模式",
-    virtualMic: "VB-Cable / Virtual Audio Cable",
+    audioCapture: "WASAPI (cpal) + 输出设备回采模式",
+    audioOutput: "默认输出或虚拟音频设备",
+    virtualMic: "可路由到 VB-Cable / Virtual Audio Cable",
     uiEngine: "GPUI DirectX/Vulkan 后端",
-    priority: "MVP 阶段",
+    priority: "联调阶段",
   },
   {
     id: "linux",
     icon: Terminal,
     name: "Linux",
-    status: "第二阶段",
+    status: "代码就绪",
     statusColor: "text-chart-5",
-    audioCapture: "PulseAudio/PipeWire Monitor",
-    audioOutput: "PulseAudio 默认 Sink",
-    virtualMic: "PulseAudio 虚拟设备",
+    audioCapture: "ALSA/PulseAudio/PipeWire (cpal 抽象)",
+    audioOutput: "默认 Sink 或虚拟设备",
+    virtualMic: "可通过虚拟设备路由（待实机完善）",
     uiEngine: "GPUI Vulkan 后端",
-    priority: "V2 阶段",
+    priority: "联调阶段",
   },
 ]
 
 const compatMatrix = [
-  { feature: "音频采集 (cpal)", macos: "done", windows: "done", linux: "planned" },
+  { feature: "音频设备枚举/选择", macos: "done", windows: "done", linux: "done" },
   { feature: "Opus 编解码", macos: "done", windows: "done", linux: "done" },
   { feature: "WebSocket 通信", macos: "done", windows: "done", linux: "done" },
-  { feature: "GPUI 渲染", macos: "done", windows: "partial", linux: "planned" },
-  { feature: "虚拟麦克风", macos: "done", windows: "planned", linux: "planned" },
-  { feature: "Loopback 回采", macos: "done", windows: "planned", linux: "planned" },
-  { feature: "音频镜像监听", macos: "done", windows: "planned", linux: "planned" },
+  { feature: "AEC3 运行时开关", macos: "done", windows: "done", linux: "done" },
+  { feature: "MCP 管理页 + 持久化", macos: "done", windows: "done", linux: "done" },
+  { feature: "MCP tools 桥接", macos: "done", windows: "done", linux: "done" },
+  { feature: "Loopback 回采", macos: "done", windows: "partial", linux: "partial" },
+  { feature: "音频镜像监听", macos: "done", windows: "partial", linux: "partial" },
+  { feature: "虚拟麦克风一键编排", macos: "partial", windows: "planned", linux: "planned" },
   { feature: "应用签名分发", macos: "partial", windows: "planned", linux: "planned" },
 ]
 
@@ -89,8 +91,8 @@ export function PlatformSection() {
             一套核心，多平台适配
           </h2>
           <p className="mt-4 text-lg leading-relaxed text-muted-foreground">
-            Cargo Workspace 隔离平台差异，cpal 统一音频抽象，GPUI 处理 GPU 渲染，
-            确保跨平台一致的用户体验。
+            当前代码以 cpal + Opus + AEC3 + rmcp 为跨平台公共主干，
+            平台差异主要集中在设备路由和虚拟音频生态联调。
           </p>
         </div>
 

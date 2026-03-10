@@ -6,57 +6,57 @@ import {
   MessageSquare,
   ShieldCheck,
   Activity,
-  Ear,
+  Wrench,
 } from "lucide-react"
 
 const features = [
   {
     icon: Mic,
     title: "实时音频采集",
-    desc: "通过 cpal 跨平台抽象层采集系统音频，支持 Loopback 回采与麦克风输入双路并行。",
+    desc: "基于 cpal 采集输入设备，支持将输出设备作为 loopback 输入源，覆盖会议下行回采场景。",
     tags: ["cpal", "CoreAudio", "WASAPI"],
   },
   {
     icon: Radio,
-    title: "WebSocket 双向流",
-    desc: "基于 tokio-tungstenite + rustls 建立加密双向音频通道，50 帧/秒连续推送。",
-    tags: ["Tokio", "TLS", "异步"],
+    title: "握手与网络探测",
+    desc: "实现 hello 超时校验、session_id 确认与 ping/pong RTT 采样，连接状态可在 UI 持续观测。",
+    tags: ["tokio-tungstenite", "rustls", "RTT"],
   },
   {
     icon: Volume2,
-    title: "虚拟麦克风输出",
-    desc: "将 AI 生成语音路由到 BlackHole / VB-Cable，会议参与者无感接收 AI 发言。",
-    tags: ["BlackHole", "VB-Cable"],
+    title: "Opus 双向音频链路",
+    desc: "上行 20ms 帧 Opus 编码发送，下行 Opus 包实时解码播放到所选输出设备。",
+    tags: ["Opus", "20ms", "Binary Frame"],
   },
   {
     icon: MessageSquare,
     title: "消息可视化",
-    desc: "WS 文本事件（STT 结果、工具调用）以聊天界面实时展示，便于调试与监控。",
+    desc: "聊天面板实时展示 STT/LLM/TTS/MCP/intent_trace 事件，并统计响应延迟。",
     tags: ["GPUI", "实时渲染"],
   },
   {
-    icon: Ear,
-    title: "VAD 智能打断",
-    desc: "集成 webrtc-vad 检测人声活动，当参会者发言时自动中断 AI 播放，实现自然对话。",
-    tags: ["webrtc-vad", "中断机制"],
+    icon: ShieldCheck,
+    title: "AEC3 回声消除",
+    desc: "支持运行时开关、共享路由强制开启与实时指标输出（stream delay/ERL/ERLE）。",
+    tags: ["aec3", "10ms", "动态延迟"],
   },
   {
     icon: Activity,
-    title: "音频处理流水线",
-    desc: "20ms PCM 分帧、Opus 编解码、rubato 重采样，构建完整的实时音频处理管线。",
-    tags: ["Opus", "rubato", "PCM"],
+    title: "听写模式控制",
+    desc: "支持 manual/auto/realtime 三种 listen mode，可在连接态动态下发到网关线程。",
+    tags: ["listen", "manual", "realtime"],
+  },
+  {
+    icon: Wrench,
+    title: "MCP 工具桥接",
+    desc: "支持 stdio/sse/stream 三类上游，完成 initialize/tools/list/tools/call 闭环。",
+    tags: ["rmcp", "JSON-RPC", "tool routing"],
   },
   {
     icon: Headphones,
-    title: "本机监听镜像",
-    desc: "输入/输出音频可镜像到系统默认扬声器，方便本机实时监听会议与 AI 的交互。",
-    tags: ["音频镜像", "调试"],
-  },
-  {
-    icon: ShieldCheck,
-    title: "Rust 安全保障",
-    desc: "所有权系统杜绝数据竞争，零成本抽象保障性能，unsafe 仅用于必要的 FFI 边界。",
-    tags: ["内存安全", "并发安全"],
+    title: "配置持久化与脱敏",
+    desc: "WS 参数、UI 偏好、MCP 列表本地保存；token/authorization 等敏感字段展示自动脱敏。",
+    tags: ["settings.json", "serde", "redaction"],
   },
 ]
 
@@ -69,10 +69,10 @@ export function FeaturesSection() {
             核心功能
           </p>
           <h2 className="text-3xl font-bold tracking-tight text-foreground md:text-4xl">
-            完整的音频网关能力矩阵
+            与当前 Rust 代码一致的能力清单
           </h2>
           <p className="mt-4 text-lg leading-relaxed text-muted-foreground">
-            从音频采集到 AI 语音输出，每个模块都针对实时性与稳定性做了深度优化。
+            覆盖连接、音频、AEC、MCP、配置与可观测性，反映当前可运行版本的真实落地状态。
           </p>
         </div>
 

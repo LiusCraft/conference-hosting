@@ -3,12 +3,13 @@ import Link from "next/link"
 const techStack = [
   { label: "语言", value: "Rust" },
   { label: "UI 框架", value: "GPUI" },
+  { label: "组件库", value: "gpui-component" },
   { label: "异步运行时", value: "Tokio" },
   { label: "音频抽象", value: "cpal" },
   { label: "编解码", value: "Opus" },
-  { label: "重采样", value: "rubato" },
-  { label: "WebSocket", value: "tungstenite" },
-  { label: "可观测性", value: "tracing" },
+  { label: "回声消除", value: "aec3" },
+  { label: "WebSocket", value: "tokio-tungstenite" },
+  { label: "MCP SDK", value: "rmcp" },
 ]
 
 export function Footer() {
@@ -28,7 +29,7 @@ export function Footer() {
               </span>
             </div>
             <p className="mt-4 max-w-xs text-sm leading-relaxed text-muted-foreground">
-              基于 Rust + GPUI 的 AI 会议语音网关，实现会议系统与 AI 平台之间的实时音频桥接。
+              基于 Rust + GPUI 的 AI 会议语音网关，当前已实现音频主链路、AEC3 与 MCP 工具桥接。
             </p>
           </div>
 
@@ -78,7 +79,7 @@ export function Footer() {
         </div>
 
         <div className="mt-12 border-t border-border pt-6 text-center text-xs text-muted-foreground">
-          AI Meeting Host 产品原型概念 | Rust + GPUI 技术方案 | 2026
+          AI Meeting Host 当前实现文档站 | Rust + GPUI + MCP Bridge | 2026
         </div>
       </div>
     </footer>

@@ -4,11 +4,13 @@
 
 当前桌面端已经具备 WebSocket 主链路（`hello` 握手、`listen` 控制、双向音频），并在聊天面板可展示 `mcp/tool/intent_trace` 类事件。
 
-下一阶段目标是让桌面端具备可配置的 MCP 能力聚合：
+在当前 Rust 实现中，MCP 第一版聚合闭环已落地：
 
-1. 在客户端提供 MCP Server 管理页面，支持添加并管理 `stdio`、`sse`、`stream` 三种接入方式。
-2. 连接 WS 后通过 `hello` 声明 MCP 能力。
-3. 按端侧 MCP 协议，接收平台下发的 `mcp` JSON-RPC 请求，完成 `initialize`、`tools/list`、`tools/call`。
+1. 客户端设置面板已支持 MCP Server 管理（新增/编辑/删除/启用/禁用/刷新）。
+2. 连接 WS 时 `hello` 已声明 `features.mcp=true`。
+3. 已可处理平台下发 `mcp` JSON-RPC 请求：`initialize`、`tools/list`、`tools/call`。
+
+本文档在保留原始设计思路的同时，补充当前实现映射与已知边界，供后续迭代使用。
 
 ---
 
@@ -265,18 +267,19 @@
 
 ---
 
-## 10. rmcp 接入策略
+## 10. rmcp 接入策略（已落地）
 
-建议引入 `rmcp` 作为统一上游 SDK：
+当前实现已接入 `rmcp` 作为统一上游 SDK：
 
 - `stdio`：`TokioChildProcess`
 - `stream`：`StreamableHttpClientTransport`
-- `sse`：优先复用 SDK 能力；若目标端为 legacy SSE 形态，补一层兼容 transport 适配
+- `sse`：当前按 Streamable HTTP 链路接入（与 `stream` 共享客户端实现）
 
-实施原则：
+当前实现特性：
 
-- 统一抽象 `McpUpstreamClient` trait，隔离具体 transport 差异。
-- 所有 transport 共享统一超时、重试、错误映射规范。
+- 统一连接超时（`connect_timeout_ms`）与请求超时（`request_timeout_ms`）。
+- 对连接失败、超时、调用失败做结构化错误回包（JSON-RPC error）。
+- 按 server 维度故障隔离，返回可用工具子集，不阻断 WS 主链路。
 
 ---
 
@@ -308,36 +311,36 @@ McpToolDescriptor {
 
 ---
 
-## 12. 里程碑
+## 12. 里程碑（当前状态）
 
-## Phase A（协议闭环）
+## Phase A（协议闭环）- 已完成
 
-- 增加 MCP 管理页基础交互
-- `hello` 增加 `features.mcp`
-- 建立 `mcp` JSON-RPC 框架（可先用 mock 工具）
+- MCP 管理页基础交互已落地
+- `hello` 已增加 `features.mcp`
+- `mcp` JSON-RPC 框架已可处理核心方法
 
-## Phase B（真实上游）
+## Phase B（真实上游）- 主体完成
 
-- 引入 `rmcp`
-- 打通 stdio/stream
-- sse 完成兼容接入
-- 打通真实 `tools/list` 与 `tools/call`
+- `rmcp` 已引入
+- `stdio`/`stream` 已打通
+- `sse` 已按当前 SDK 统一链路接入
+- 真实 `tools/list` 与 `tools/call` 已可联调
 
-## Phase C（增强）
+## Phase C（增强）- 进行中
 
-- 健康检查与自动重连
-- 更完整分页/缓存策略
-- 调用指标与审计视图
+- 健康检查与自动重连策略待补齐
+- 分页/缓存策略当前为简化实现（含工具数量上限保护）
+- 调用指标与审计视图尚未完整落地
 
 ---
 
-## 13. 验收标准
+## 13. 验收状态（2026-03-11）
 
-1. 设置面板可管理三类 MCP Server，并可持久化。
-2. 连接 WS 后可在 `hello` 中看到 `features.mcp`。
-3. 平台发 `initialize/tools/list/tools/call` 均得到正确响应。
-4. 某上游 server 失败时，主链路不断开，错误可见且可定位。
-5. 日志中敏感字段全部脱敏。
+1. 设置面板可管理三类 MCP Server，并支持本地持久化（已完成）。
+2. 连接 WS 后可在 `hello` 中看到 `features.mcp`（已完成）。
+3. 平台发 `initialize/tools/list/tools/call` 可获得响应（已完成）。
+4. 单个上游 server 失败时主链路保持可用，错误可在 UI/日志定位（已完成）。
+5. 敏感字段脱敏已在关键信息展示链路落地（已完成，后续继续扩展覆盖面）。
 
 ---
 
@@ -357,13 +360,20 @@ McpToolDescriptor {
 
 ---
 
-## 15. 与现有工程的对应关系
+## 15. 与现有工程的对应关系（已落地）
 
-建议影响模块：
+当前已落地模块：
 
-- `crates/host-core`：协议模型扩展（hello features + mcp envelope）
-- `crates/host-platform`：WS mcp 消息收发能力
-- `apps/host-app-gpui/src/features/settings.rs`：管理页入口与交互
-- `apps/host-app-gpui/src/gateway_runtime.rs`：mcp 请求处理与上游路由
+- `crates/host-core`：`hello` features 与 `mcp` envelope、JSON-RPC 数据结构
+- `crates/host-platform`：WS 文本/二进制事件收发与会话握手
+- `apps/host-app-gpui/src/mcp/mod.rs`：MCP 聚合、上游连接、工具路由、错误映射
+- `apps/host-app-gpui/src/features/mcp_servers.rs`：MCP 管理页交互与本地探测
+- `apps/host-app-gpui/src/app/persistence.rs`：MCP 配置持久化
+- `apps/host-app-gpui/src/gateway_runtime.rs`：WS `mcp` 消息处理与回包下发
 
-本文件仅为设计方案，不包含代码变更。
+## 16. 当前边界与后续补齐
+
+- `tools/list` 当前采用全量刷新策略，后续可增加增量缓存与分页。
+- `sse` 与 `stream` 当前复用同一 HTTP 客户端链路，针对 legacy SSE 的专门兼容仍可增强。
+- 缺少独立审计视图与统计面板，当前以聊天面板与日志为主。
+- 连接健康检查与自动重连策略仍需进一步完善。

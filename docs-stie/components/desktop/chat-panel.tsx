@@ -15,17 +15,17 @@ interface Message {
 
 const MOCK_MESSAGES: Message[] = [
   { id: "1", type: "system", text: "WebSocket 连接已建立", timestamp: "14:23:01" },
-  { id: "2", type: "system", text: "hello 握手成功 | PCM 16kHz Mono 16bit 20ms", timestamp: "14:23:01" },
-  { id: "3", type: "system", text: "开始音频采集: BlackHole 2ch (Loopback)", timestamp: "14:23:02" },
-  { id: "4", type: "stt", text: "大家好，今天我们来讨论一下第二季度的营销策略。", timestamp: "14:23:15" },
-  { id: "5", type: "tool", text: "function_call: analyze_context({\"topic\": \"Q2 marketing strategy\", \"participants\": 4})", timestamp: "14:23:16" },
-  { id: "6", type: "ai", text: "好的，我来做一些补充。根据第一季度的数据，我们在社交媒体渠道的转化率提升了 23%，建议第二季度加大在短视频平台的投入。", timestamp: "14:23:18", audioDuration: "8.2s" },
-  { id: "7", type: "stt", text: "这个建议不错，你能详细说一下具体的预算分配吗？", timestamp: "14:23:35" },
-  { id: "8", type: "ai", text: "建议将总预算的 40% 分配给短视频平台，包括抖音和视频号。25% 用于搜索引擎优化，20% 用于邮件营销的自动化升级，剩余 15% 作为 A/B 测试的灵活预算。", timestamp: "14:23:38", audioDuration: "12.5s" },
-  { id: "9", type: "stt", text: "那关于 KPI 的设定呢？我们需要设定哪些关键指标？", timestamp: "14:24:02" },
-  { id: "10", type: "tool", text: "function_call: get_kpi_template({\"domain\": \"digital_marketing\", \"quarter\": \"Q2\"})", timestamp: "14:24:03" },
-  { id: "11", type: "ai", text: "核心 KPI 建议如下：第一，新增获客成本控制在 45 元以下；第二，短视频平台的自然流量增长目标 30%；第三，用户留存率从当前的 62% 提升到 70%；第四，ROI 整体目标不低于 3.5 倍。", timestamp: "14:24:06", audioDuration: "15.1s" },
-  { id: "12", type: "stt", text: "好的，这些指标看起来可行。我们接下来讨论一下时间节点。", timestamp: "14:24:30" },
+  { id: "2", type: "system", text: "hello 握手成功 | session_id=session-001 | features.mcp=true", timestamp: "14:23:01" },
+  { id: "3", type: "system", text: "音频路由已启用: input=loopback:BlackHole 2ch, output=BlackHole 2ch", timestamp: "14:23:02" },
+  { id: "4", type: "system", text: "AEC enabled (AEC3 real-time, 16kHz mono)", timestamp: "14:23:02" },
+  { id: "5", type: "stt", text: "请帮我汇总今天下午的会议安排。", timestamp: "14:23:10" },
+  { id: "6", type: "tool", text: "mcp.tools/list -> tools=[calendar.get_events, note.create, task.add]", timestamp: "14:23:10" },
+  { id: "7", type: "tool", text: "mcp.tools/call calendar.get_events({\"range\":\"today_afternoon\"})", timestamp: "14:23:11" },
+  { id: "8", type: "ai", text: "今天下午共有 3 场会议：14:00 产品评审、15:30 研发同步、17:00 客户复盘。需要我生成简要提醒吗？", timestamp: "14:23:13", audioDuration: "6.8s" },
+  { id: "9", type: "stt", text: "好的，帮我把研发同步会议加一个会前 10 分钟提醒。", timestamp: "14:23:25" },
+  { id: "10", type: "tool", text: "mcp.tools/call task.add({\"title\":\"研发同步会前提醒\",\"at\":\"15:20\"})", timestamp: "14:23:26" },
+  { id: "11", type: "ai", text: "已创建提醒：15:20 通知你准备参加研发同步会议。", timestamp: "14:23:27", audioDuration: "3.1s" },
+  { id: "12", type: "system", text: "intent_trace: 2 steps | mcp route=calendar.get_events -> task.add", timestamp: "14:23:27" },
 ]
 
 function MessageBubble({ message }: { message: Message }) {

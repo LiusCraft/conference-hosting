@@ -5,15 +5,16 @@ const phases = [
     status: "进行中",
     statusColor: "bg-primary text-primary-foreground",
     items: [
-      { label: "macOS 音频采集 + 播放主链路", done: true },
+      { label: "Cargo Workspace + GPUI 桌面壳", done: true },
       { label: "WebSocket 双向通信（hello / listen / 音频帧）", done: true },
       { label: "GPUI 聊天消息可视化界面", done: true },
       { label: "cpal 麦克风采集 + Opus 编码上行", done: true },
       { label: "下行 Opus 解码 + 扬声器播放", done: true },
       { label: "输入/输出设备列表选择", done: true },
-      { label: "BlackHole 虚拟麦克风切换", done: true },
+      { label: "MCP 管理页 + tools 桥接闭环", done: true },
       { label: "Loopback 回采与音频镜像", done: true },
-      { label: "Windows WASAPI 适配", done: false },
+      { label: "AEC3 实时回声消除 + 指标面板", done: true },
+      { label: "跨平台实机联调（Windows/Linux）", done: false },
     ],
   },
   {
@@ -22,9 +23,10 @@ const phases = [
     status: "计划中",
     statusColor: "bg-chart-2/20 text-chart-2",
     items: [
-      { label: "完整 AEC 回声消除方案", done: false },
+      { label: "虚拟麦克风一键自动编排", done: false },
+      { label: "网关自动重连与健康检查", done: false },
       { label: "VAD 智能打断 + 静音检测", done: false },
-      { label: "会议纪要自动生成与导出", done: false },
+      { label: "MCP 调用审计与指标看板", done: false },
       { label: "macOS + Windows 应用签名分发", done: false },
       { label: "系统托盘常驻 + 快捷键控制", done: false },
       { label: "音频质量监控仪表板", done: false },
@@ -58,7 +60,7 @@ export function RoadmapSection() {
             从 MVP 到全功能平台
           </h2>
           <p className="mt-4 text-lg leading-relaxed text-muted-foreground">
-            分阶段交付，MVP 聚焦核心音频链路，后续逐步扩展 AEC、多角色 AI、跨平台支持等高级能力。
+            路线图已按当前代码状态刷新：先完成跨平台联调与发布质量，再扩展会议智能能力。
           </p>
         </div>
 

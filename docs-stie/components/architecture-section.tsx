@@ -11,23 +11,23 @@ const layers = [
     dotColor: "bg-chart-2",
   },
   {
-    id: "capture",
-    label: "音频采集层",
-    desc: "CoreAudio (macOS) / WASAPI (Win) / PulseAudio (Linux) 通过 cpal 抽象",
+    id: "ui",
+    label: "GPUI 桌面壳",
+    desc: "连接控制、设备选择、聊天事件流、设置面板、MCP 管理页面",
     color: "bg-primary/10 border-primary/30 text-primary",
     dotColor: "bg-primary",
   },
   {
-    id: "process",
-    label: "音频处理引擎",
-    desc: "20ms 分帧 / PCM 16kHz 16bit Mono / Opus 编码 / rubato 重采样",
+    id: "runtime",
+    label: "网关运行时",
+    desc: "cpal 采集/播放 + Opus 编解码 + AEC3 回声消除 + 命令/事件通道",
     color: "bg-chart-3/15 border-chart-3/30 text-chart-3",
     dotColor: "bg-chart-3",
   },
   {
     id: "ws",
-    label: "WebSocket 通信层",
-    desc: "tokio-tungstenite + rustls 双向流，50 帧/秒上行",
+    label: "host-platform WS 适配层",
+    desc: "hello 握手、header 注入、超时控制、文本/二进制事件拆分",
     color: "bg-chart-5/15 border-chart-5/30 text-chart-5",
     dotColor: "bg-chart-5",
   },
@@ -39,21 +39,21 @@ const layers = [
     dotColor: "bg-chart-4",
   },
   {
-    id: "output",
-    label: "虚拟麦克风输出",
-    desc: "BlackHole (macOS) / VB-Cable (Win) 向会议回放 AI 语音",
+    id: "mcp",
+    label: "MCP 上游能力层",
+    desc: "stdio / sse / stream 接入，工具以 <alias>.<tool> 命名空间聚合",
     color: "bg-chart-2/15 border-chart-2/30 text-chart-2",
     dotColor: "bg-chart-2",
   },
 ]
 
 const dataFlowSteps = [
-  { step: "01", label: "音频采集", detail: "从系统音频设备获取会议下行音频 PCM 流" },
-  { step: "02", label: "帧切分", detail: "以 20ms 为单位切分，每帧 320 samples / 640 bytes" },
-  { step: "03", label: "编码上行", detail: "Opus 编码后通过 WebSocket Binary Frame 发送" },
-  { step: "04", label: "AI 处理", detail: "服务端 ASR 转文本 -> LLM 推理 -> TTS 语音合成" },
-  { step: "05", label: "下行解码", detail: "接收 Opus 音频流，本地解码为 PCM" },
-  { step: "06", label: "播放输出", detail: "经虚拟麦克风输出到会议软件，参会者听到 AI 回答" },
+  { step: "01", label: "连接握手", detail: "发送 hello（含 notify/mcp features），等待 session_id" },
+  { step: "02", label: "采集上行", detail: "cpal 回调采集输入设备，10ms AEC 处理后聚合为 20ms 音频帧" },
+  { step: "03", label: "编码发送", detail: "20ms PCM16 mono 编码为 Opus，通过 WebSocket Binary 连续上送" },
+  { step: "04", label: "平台处理", detail: "平台执行 ASR/LLM/TTS，同时下发 stt/tts/notify/mcp 文本事件" },
+  { step: "05", label: "下行播放", detail: "客户端解码 Opus 包并播放到选定输出设备，可镜像到系统扬声器" },
+  { step: "06", label: "MCP 回包", detail: "处理 initialize/tools/list/tools/call 并按路由返回 JSON-RPC 响应" },
 ]
 
 export function ArchitectureSection() {
@@ -68,10 +68,10 @@ export function ArchitectureSection() {
             系统架构
           </p>
           <h2 className="text-3xl font-bold tracking-tight text-foreground md:text-4xl">
-            端到端音频网关架构
+            代码实现映射架构
           </h2>
           <p className="mt-4 text-lg leading-relaxed text-muted-foreground">
-            从会议音频采集到 AI 语音回放，六层架构确保低延迟、高可靠的实时语音处理链路。
+            以 host-core / host-platform / host-app-gpui 为主干，串联音频主链路与 MCP 工具链路。
           </p>
         </div>
 
@@ -149,23 +149,24 @@ export function ArchitectureSection() {
               </div>
             </div>
 
-            {/* Latency breakdown */}
+            {/* Runtime defaults */}
             <div className="mt-10 rounded-xl border border-border bg-card/50 p-6">
               <h4 className="mb-4 text-sm font-semibold text-foreground">
-                延迟分解（目标 {'<'} 1s）
+                运行时关键参数（当前默认）
               </h4>
               <div className="flex flex-col gap-3">
                 {[
-                  { label: "音频帧", ms: 20, pct: 3 },
-                  { label: "网络传输", ms: 50, pct: 7 },
-                  { label: "ASR 识别", ms: 200, pct: 28 },
-                  { label: "AI 推理", ms: 300, pct: 43 },
-                  { label: "TTS 合成", ms: 200, pct: 28 },
+                  { label: "音频帧时长", value: "20ms", pct: 10 },
+                  { label: "WS ping 间隔", value: "2s", pct: 22 },
+                  { label: "WS ping 超时", value: "6s", pct: 35 },
+                  { label: "hello 超时", value: "5s", pct: 30 },
+                  { label: "MCP connect_timeout", value: "3000ms", pct: 18 },
+                  { label: "MCP request_timeout", value: "8000ms", pct: 45 },
                 ].map((item) => (
                   <div key={item.label}>
                     <div className="flex items-center justify-between text-xs">
                       <span className="text-muted-foreground">{item.label}</span>
-                      <span className="font-mono text-foreground">{item.ms}ms</span>
+                      <span className="font-mono text-foreground">{item.value}</span>
                     </div>
                     <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-secondary">
                       <div
@@ -177,10 +178,10 @@ export function ArchitectureSection() {
                 ))}
                 <div className="mt-2 flex items-center justify-between border-t border-border pt-3">
                   <span className="text-xs font-medium text-muted-foreground">
-                    总延迟
+                    备注
                   </span>
                   <span className="font-mono text-sm font-bold text-primary">
-                    ~770ms
+                    实时时延以 RTT/AEC 指标面板为准
                   </span>
                 </div>
               </div>
