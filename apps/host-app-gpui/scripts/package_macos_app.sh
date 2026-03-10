@@ -37,6 +37,8 @@ mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$BINARY_PATH" "$MACOS_DIR/host-app-gpui"
 chmod +x "$MACOS_DIR/host-app-gpui"
 cp "$ICON_PATH" "$RESOURCES_DIR/app-taskbar-logo.icns"
+rm -rf "$RESOURCES_DIR/assets"
+cp -R "$APP_DIR/assets" "$RESOURCES_DIR/assets"
 
 cat > "$CONTENTS_DIR/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

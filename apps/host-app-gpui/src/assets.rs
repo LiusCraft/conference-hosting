@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::env;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::PathBuf;
@@ -12,9 +13,40 @@ pub struct AppAssets {
 impl AppAssets {
     pub fn new() -> Self {
         Self {
-            base: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"),
+            base: resolve_assets_base(),
         }
     }
+}
+
+fn resolve_assets_base() -> PathBuf {
+    let mut candidates = Vec::new();
+
+    if let Some(path) = env::var_os("AI_MEETING_HOST_ASSETS_DIR") {
+        candidates.push(PathBuf::from(path));
+    }
+
+    if let Ok(exe_path) = env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            candidates.push(exe_dir.join("assets"));
+
+            if exe_dir.file_name().is_some_and(|name| name == "MacOS") {
+                if let Some(contents_dir) = exe_dir.parent() {
+                    candidates.push(contents_dir.join("Resources").join("assets"));
+                }
+            }
+        }
+    }
+
+    let manifest_assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets");
+    candidates.push(manifest_assets.clone());
+
+    for candidate in candidates {
+        if candidate.is_dir() {
+            return candidate;
+        }
+    }
+
+    manifest_assets
 }
 
 impl AssetSource for AppAssets {
