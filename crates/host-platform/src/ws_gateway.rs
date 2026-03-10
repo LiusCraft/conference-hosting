@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -151,6 +151,8 @@ pub struct WsGatewayClient {
 
 impl WsGatewayClient {
     pub async fn connect(config: WsGatewayConfig) -> Result<Self, WsGatewayError> {
+        ensure_rustls_crypto_provider();
+
         let url = config.websocket_url()?;
         let mut request = url.as_str().into_client_request()?;
         {
@@ -314,6 +316,18 @@ impl WsGatewayClient {
     }
 }
 
+fn ensure_rustls_crypto_provider() {
+    static RUSTLS_PROVIDER_INIT: Once = Once::new();
+
+    RUSTLS_PROVIDER_INIT.call_once(|| {
+        if rustls::crypto::CryptoProvider::get_default().is_some() {
+            return;
+        }
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 fn header_value(name: &'static str, value: &str) -> Result<HeaderValue, WsGatewayError> {
     HeaderValue::from_str(value)
         .map_err(|source| WsGatewayError::InvalidHeaderValue { name, source })
@@ -376,6 +390,12 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
 
     use super::{WsGatewayClient, WsGatewayConfig, WsGatewayError, WsGatewayEvent};
+
+    #[test]
+    fn rustls_crypto_provider_is_available() {
+        super::ensure_rustls_crypto_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
 
     fn expect_text(message: Message) -> String {
         match message {

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 futures-util.workspace = true
 host-core = { path = "../host-core" }
+rustls.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
