@@ -31,6 +31,7 @@ If any of the above are added later, treat them as high-priority instructions an
 - If introducing a toolchain, document it in this file immediately.
 - Preserve existing language in docs unless asked to translate.
 - Agents must respond to users in Chinese by default.
+- Treat `origin/main` as the canonical upstream main branch and default base for diffs and pull requests.
 
 ## Build / Lint / Test Commands
 
@@ -149,6 +150,8 @@ Use the conventions below for any new code until project-specific rules are adde
 
 ### Documentation Expectations
 
+- Keep `README.md` concise for project overview and quick start.
+- Move detailed operational guides (CI workflows, release playbooks, maintenance runbooks) to files under `docs/`.
 - Update `docs/ai_meeting_hosting_design.md` when architecture changes.
 - Keep protocol examples versioned and internally consistent.
 - Record assumptions (audio format, frame duration, latency budgets).
