@@ -25,12 +25,65 @@ jobs:
         uses: anomalyco/opencode/github@latest
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_MCP_TOKEN: ${{ secrets.GITHUB_MCP_PAT || github.token }}
+          OPENCODE_CONFIG_CONTENT: |
+            {
+              "$schema": "https://opencode.ai/config.json",
+              "mcp": {
+                "github": {
+                  "type": "remote",
+                  "url": "https://api.githubcopilot.com/mcp/",
+                  "oauth": false,
+                  "headers": {
+                    "Authorization": "Bearer {env:GITHUB_MCP_TOKEN}",
+                    "X-MCP-Toolsets": "context,repos,pull_requests,issues"
+                  }
+                }
+              }
+            }
         with:
           model: ${{ vars.OPENCODE_MODEL || 'opencode/minimax-m2.5-free' }}
+          use_github_token: true
           prompt: |
-            Review this pull request.
-            Focus on:
-            - correctness and potential regressions
-            - code quality and maintainability
-            - missing tests or edge cases
-            Keep feedback concise and actionable.
+            Review this pull request with a high-signal, bug-first process.
+
+            Process:
+            1) Do quick skip checks. If this PR is draft/closed, or changes are clearly trivial and obviously correct,
+               avoid nitpicks.
+            2) Read project rules from root AGENTS.md and any AGENTS.md files relevant to changed paths.
+            3) Read the PR title/body and inspect the full diff across all commits.
+            4) Run focused review passes for:
+               - AGENTS.md compliance (only rules that scope to changed files)
+               - Definite correctness bugs and regressions
+               - Compile/parse/type/import/reference breakage
+               - Security issues introduced by changed lines
+            5) Validate every candidate issue before reporting. If uncertain, drop it.
+
+            Issue quality bar:
+            - Only report high-confidence, actionable issues.
+            - Include exact file and line, user impact, and a concrete fix direction.
+            - Never report style nits, speculative risks, or generic quality advice.
+            - Do not report missing tests unless AGENTS.md explicitly requires them for this scope.
+            - One comment per unique issue; no duplicates.
+
+            Commenting behavior (required):
+            - Use GitHub MCP review tools, not plain PR comments, when issues are found.
+            - First create or use a pending review, then add inline comments for each issue.
+            - Post inline comments on the exact changed line/path.
+            - For small self-contained fixes (<= 5 lines, single location), include a GitHub suggestion block:
+
+              ```suggestion
+              <replacement code>
+              ```
+
+            - Only include suggestion blocks when applying the suggestion fully fixes the issue.
+              If follow-up changes are needed, do not use suggestion block.
+            - After inline comments are added, submit the pending review.
+
+            If no issues are found:
+            - Do not add inline comments.
+            - Submit a single concise review message exactly as:
+              No issues found. Checked for bugs and AGENTS.md compliance.
+
+            Keep all feedback concise and actionable.
