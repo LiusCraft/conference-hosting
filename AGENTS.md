@@ -150,6 +150,8 @@ Use the conventions below for any new code until project-specific rules are adde
 
 ### Documentation Expectations
 
+- Keep `README.md` concise for project overview and quick start.
+- Move detailed operational guides (CI workflows, release playbooks, maintenance runbooks) to files under `docs/`.
 - Update `docs/ai_meeting_hosting_design.md` when architecture changes.
 - Keep protocol examples versioned and internally consistent.
 - Record assumptions (audio format, frame duration, latency budgets).
