@@ -79,11 +79,11 @@ jobs:
 
             - Only include suggestion blocks when applying the suggestion fully fixes the issue.
               If follow-up changes are needed, do not use suggestion block.
-            - After inline comments are added, submit the pending review.
+            - After inline comments are added, submit the pending review without adding a separate summary body.
 
             If no issues are found:
+            - Do not create a pending review.
             - Do not add inline comments.
-            - Submit a single concise review message exactly as:
-              No issues found. Checked for bugs and AGENTS.md compliance.
+            - Do not submit any GitHub review/comment via MCP.
 
             Keep all feedback concise and actionable.
