@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use host_core::{InboundTextMessage, JsonRpcMessage, McpEnvelopeMessage};
@@ -906,6 +908,99 @@ impl McpBridge {
     }
 }
 
+fn collect_stdio_path_entries(env: &BTreeMap<String, String>) -> Vec<PathBuf> {
+    let mut entries = Vec::new();
+
+    if let Some(explicit_path) = env
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+        .map(|(_, value)| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        entries.extend(
+            std::env::split_paths(explicit_path).filter(|path| !path.as_os_str().is_empty()),
+        );
+    }
+
+    if let Some(system_path) = std::env::var_os("PATH") {
+        entries.extend(
+            std::env::split_paths(&system_path).filter(|path| !path.as_os_str().is_empty()),
+        );
+    }
+
+    entries.extend(
+        [
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+            PathBuf::from("/usr/sbin"),
+            PathBuf::from("/sbin"),
+        ]
+        .into_iter()
+        .filter(|path| !path.as_os_str().is_empty()),
+    );
+
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for path in entries {
+        let normalized = path.to_string_lossy().into_owned();
+        if normalized.is_empty() || !seen.insert(normalized) {
+            continue;
+        }
+        deduped.push(path);
+    }
+
+    deduped
+}
+
+fn join_path_entries(path_entries: &[PathBuf]) -> Option<String> {
+    if path_entries.is_empty() {
+        return None;
+    }
+
+    std::env::join_paths(path_entries)
+        .ok()
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
+fn command_looks_like_path(command: &str) -> bool {
+    Path::new(command).is_absolute() || command.contains('/') || command.contains('\\')
+}
+
+fn resolve_stdio_command_path(command: &str, path_entries: &[PathBuf]) -> String {
+    let trimmed = command.trim();
+    if trimmed.is_empty() || command_looks_like_path(trimmed) {
+        return trimmed.to_string();
+    }
+
+    for base in path_entries {
+        let candidate = base.join(trimmed);
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+
+    trimmed.to_string()
+}
+
+fn format_stdio_spawn_error(command: &str, error: std::io::Error) -> String {
+    if error.kind() != ErrorKind::NotFound {
+        return format!("stdio 进程创建失败: {error}");
+    }
+
+    let trimmed = command.trim();
+    if trimmed.split_whitespace().count() > 1 {
+        return format!(
+            "stdio 进程创建失败: 未找到命令 `{trimmed}`。Command 仅填写可执行文件，参数请放到 Args。"
+        );
+    }
+
+    format!(
+        "stdio 进程创建失败: 未找到命令 `{trimmed}`。请在 Command 中填写绝对路径（例如 `/opt/homebrew/bin/npx`），或在 Env 中设置 PATH（例如 `PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`）。"
+    )
+}
+
 async fn connect_upstream_service(server: &McpServerConfig) -> Result<UpstreamService, String> {
     match &server.transport {
         McpTransportConfig::Stdio {
@@ -914,9 +1009,19 @@ async fn connect_upstream_service(server: &McpServerConfig) -> Result<UpstreamSe
             env,
             cwd,
         } => {
-            let mut child = Command::new(command);
+            let path_entries = collect_stdio_path_entries(env);
+            let resolved_command = resolve_stdio_command_path(command, &path_entries);
+            let mut child = Command::new(&resolved_command);
             child.args(args);
+
+            if let Some(merged_path) = join_path_entries(&path_entries) {
+                child.env("PATH", merged_path);
+            }
+
             for (key, value) in env {
+                if key.eq_ignore_ascii_case("PATH") {
+                    continue;
+                }
                 child.env(key, value);
             }
             if let Some(cwd) = cwd {
@@ -924,7 +1029,7 @@ async fn connect_upstream_service(server: &McpServerConfig) -> Result<UpstreamSe
             }
 
             let transport = TokioChildProcess::new(child)
-                .map_err(|error| format!("stdio 进程创建失败: {error}"))?;
+                .map_err(|error| format_stdio_spawn_error(command, error))?;
 
             ().serve(transport)
                 .await
@@ -1069,8 +1174,11 @@ fn normalize_auth_header(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
-        new_mcp_server_id, preview_probe_statuses, validate_server_config, McpBridge,
+        collect_stdio_path_entries, format_stdio_spawn_error, new_mcp_server_id,
+        preview_probe_statuses, resolve_stdio_command_path, validate_server_config, McpBridge,
         McpProbeState, McpServerConfig, McpTransportConfig, DEFAULT_MCP_CONNECT_TIMEOUT_MS,
         DEFAULT_MCP_REQUEST_TIMEOUT_MS,
     };
@@ -1148,5 +1256,46 @@ mod tests {
             response.payload.error.as_ref().expect("error").code,
             -32_602
         );
+    }
+
+    #[test]
+    fn stdio_path_entries_prioritize_explicit_env_path() {
+        let custom_bin = std::path::PathBuf::from("/tmp/host-app-mcp-custom-bin");
+        let mut env = BTreeMap::new();
+        env.insert(
+            "PATH".to_string(),
+            std::env::join_paths([custom_bin.clone()])
+                .expect("join PATH")
+                .to_string_lossy()
+                .into_owned(),
+        );
+
+        let entries = collect_stdio_path_entries(&env);
+        assert_eq!(entries.first(), Some(&custom_bin));
+    }
+
+    #[test]
+    fn resolve_stdio_command_path_finds_binary_in_search_paths() {
+        let temp_dir = std::env::temp_dir().join(new_mcp_server_id("resolve-path"));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        let binary = temp_dir.join("demo-mcp-binary");
+        std::fs::write(&binary, "#!/bin/sh\nexit 0\n").expect("write fake binary");
+
+        let resolved =
+            resolve_stdio_command_path("demo-mcp-binary", std::slice::from_ref(&temp_dir));
+        assert_eq!(resolved, binary.to_string_lossy().as_ref());
+
+        let _ = std::fs::remove_file(binary);
+        let _ = std::fs::remove_dir(temp_dir);
+    }
+
+    #[test]
+    fn stdio_spawn_error_guides_user_when_command_contains_arguments() {
+        let message = format_stdio_spawn_error(
+            "npx @mauricio.wolff/mcp-obsidian@latest",
+            std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+        );
+        assert!(message.contains("参数请放到 Args"));
     }
 }
