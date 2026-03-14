@@ -38,6 +38,8 @@ pub(crate) struct PersistedUiSettings {
     #[serde(default)]
     pub(crate) show_ai_emotion_messages: Option<bool>,
     #[serde(default)]
+    pub(crate) show_debug_logs: Option<bool>,
+    #[serde(default)]
     pub(crate) listen_mode: Option<ListenMode>,
 }
 

@@ -89,6 +89,8 @@ pub(crate) struct MeetingHostShell {
     pub(crate) listen_mode_draft: ListenMode,
     pub(crate) show_ai_emotion_messages: bool,
     pub(crate) show_ai_emotion_messages_draft: bool,
+    pub(crate) show_debug_logs: bool,
+    pub(crate) show_debug_logs_draft: bool,
     pub(crate) mcp_servers: Vec<McpServerConfig>,
     pub(crate) mcp_servers_draft: Vec<McpServerConfig>,
     pub(crate) mcp_server_statuses: Vec<McpServerProbeStatus>,
@@ -152,6 +154,7 @@ impl MeetingHostShell {
             .ui
             .show_ai_emotion_messages
             .unwrap_or(false);
+        let initial_show_debug_logs = persisted_settings.ui.show_debug_logs.unwrap_or(false);
         let initial_listen_mode = persisted_settings
             .ui
             .listen_mode
@@ -367,6 +370,8 @@ impl MeetingHostShell {
             listen_mode_draft: initial_listen_mode,
             show_ai_emotion_messages: initial_show_ai_emotion_messages,
             show_ai_emotion_messages_draft: initial_show_ai_emotion_messages,
+            show_debug_logs: initial_show_debug_logs,
+            show_debug_logs_draft: initial_show_debug_logs,
             mcp_servers: initial_mcp_servers.clone(),
             mcp_servers_draft: initial_mcp_servers,
             mcp_server_statuses: Vec::new(),

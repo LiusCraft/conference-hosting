@@ -48,9 +48,11 @@ impl MeetingHostShell {
         self.client_id_draft = self.client_id.clone();
         self.apply_aec_enabled(self.aec_enabled_draft);
         self.apply_show_ai_emotion_messages(self.show_ai_emotion_messages_draft);
+        self.apply_show_debug_logs(self.show_debug_logs_draft);
         self.apply_listen_mode(self.listen_mode_draft);
         self.aec_enabled_draft = self.aec_enabled;
         self.show_ai_emotion_messages_draft = self.show_ai_emotion_messages;
+        self.show_debug_logs_draft = self.show_debug_logs;
         self.listen_mode_draft = self.listen_mode;
         let mcp_changed = self.mcp_servers != self.mcp_servers_draft;
         self.mcp_servers = self.mcp_servers_draft.clone();
@@ -66,6 +68,7 @@ impl MeetingHostShell {
             ui: PersistedUiSettings {
                 aec_enabled: Some(self.aec_enabled),
                 show_ai_emotion_messages: Some(self.show_ai_emotion_messages),
+                show_debug_logs: Some(self.show_debug_logs),
                 listen_mode: Some(self.listen_mode),
             },
             mcp_servers: self.mcp_servers.clone(),
@@ -108,6 +111,7 @@ impl MeetingHostShell {
         self.client_id_draft = self.client_id.clone();
         self.aec_enabled_draft = self.aec_enabled;
         self.show_ai_emotion_messages_draft = self.show_ai_emotion_messages;
+        self.show_debug_logs_draft = self.show_debug_logs;
         self.listen_mode_draft = self.listen_mode;
         self.reset_mcp_settings_drafts(window, cx);
         self.write_settings_input_values(window, cx);
@@ -135,6 +139,11 @@ impl MeetingHostShell {
 
     pub(crate) fn toggle_ai_emotion_messages(&mut self, cx: &mut Context<Self>) {
         self.show_ai_emotion_messages_draft = !self.show_ai_emotion_messages_draft;
+        self.notify_views(cx);
+    }
+
+    pub(crate) fn toggle_debug_logs(&mut self, cx: &mut Context<Self>) {
+        self.show_debug_logs_draft = !self.show_debug_logs_draft;
         self.notify_views(cx);
     }
 
@@ -174,6 +183,10 @@ impl MeetingHostShell {
             "AI emotion placeholders are now hidden"
         };
         self.push_chat(crate::app::state::ChatRole::System, "System", state);
+    }
+
+    fn apply_show_debug_logs(&mut self, enabled: bool) {
+        self.show_debug_logs = enabled;
     }
 
     fn apply_aec_enabled(&mut self, enabled: bool) {
@@ -293,6 +306,7 @@ impl MeetingHostShell {
         let close_view = cx.entity().downgrade();
         let save_view = cx.entity().downgrade();
         let toggle_ai_view = cx.entity().downgrade();
+        let toggle_debug_view = cx.entity().downgrade();
         let toggle_aec_view = cx.entity().downgrade();
         let set_manual_mode_view = cx.entity().downgrade();
         let set_auto_mode_view = cx.entity().downgrade();
@@ -808,6 +822,63 @@ impl MeetingHostShell {
                                                     let _ = toggle_ai_view.update(cx, |view, cx| {
                                                         view.toggle_ai_emotion_messages(cx)
                                                     });
+                                                }),
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_start()
+                                    .justify_between()
+                                    .gap_3()
+                                    .rounded_lg()
+                                    .border_1()
+                                    .border_color(rgb(0x1d283a))
+                                    .bg(rgb(0x101726))
+                                    .px_3()
+                                    .py_2()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .gap_0p5()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(rgb(0xd7e0f0))
+                                                    .child("显示 DEBUG 日志"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(0x7d8aa0))
+                                                    .whitespace_normal()
+                                                    .child(
+                                                        "展示 System/Client/Tool/Trace 等非用户对话消息，用于排查链路问题",
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        div().flex_none().child(
+                                            Button::new("toggle-debug-logs")
+                                                .h_8()
+                                                .px_3()
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .when(self.show_debug_logs_draft, |this| {
+                                                    this.success().child("显示中")
+                                                })
+                                                .when(!self.show_debug_logs_draft, |this| {
+                                                    this.outline().child("已隐藏")
+                                                })
+                                                .on_click(move |_, _, cx| {
+                                                    let _ =
+                                                        toggle_debug_view.update(cx, |view, cx| {
+                                                            view.toggle_debug_logs(cx)
+                                                        });
                                                 }),
                                         ),
                                     ),
