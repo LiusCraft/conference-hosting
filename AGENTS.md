@@ -31,6 +31,7 @@ If any of the above are added later, treat them as high-priority instructions an
 - If introducing a toolchain, document it in this file immediately.
 - Preserve existing language in docs unless asked to translate.
 - Agents must respond to users in Chinese by default.
+- Treat `origin/main` as the canonical upstream main branch and default base for diffs and pull requests.
 
 ## Build / Lint / Test Commands
 

@@ -190,6 +190,22 @@ git tag v0.1.1
 git push origin v0.1.1
 ```
 
+## GitHub Actions：OpenCode 助手
+
+仓库内置工作流：`.github/workflows/opencode.yml`。
+
+触发方式：
+
+- 在 Issue 或 PR 评论中包含 `/opencode` 或 `/oc`
+- 在 PR 的代码行评论中包含 `/opencode` 或 `/oc`
+
+首次启用前请完成：
+
+1. 安装 GitHub App：`https://github.com/apps/opencode-agent`
+2. 在仓库 `Settings -> Secrets and variables -> Actions` 中配置至少一个模型提供商密钥：
+   - `OPENCODE_API_KEY`（默认模型 `opencode/minimax-m2.5-free`）
+3. 可选：添加仓库 Variable `OPENCODE_MODEL` 覆盖默认模型（格式：`provider/model`）
+
 ## 当前边界
 
 - 虚拟麦克风自动化编排（BlackHole/VB-Cable 等）仍需手动配合系统路由
