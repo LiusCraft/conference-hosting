@@ -100,7 +100,17 @@ impl MeetingHostShell {
     }
 
     fn render_message_stream_panel(&mut self, cx: &mut Context<Self>) -> Div {
-        let total_messages = self.chat_messages.len();
+        let filtered_messages = self
+            .chat_messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| self.show_debug_logs || !message.role.is_debug_log())
+            .collect::<Vec<_>>();
+        let hidden_debug_message_count = self
+            .chat_messages
+            .len()
+            .saturating_sub(filtered_messages.len());
+        let total_messages = filtered_messages.len();
         let visible_message_count =
             if self.follow_latest_chat_messages && !self.render_full_chat_history {
                 total_messages.min(LIVE_CHAT_RENDER_LIMIT)
@@ -123,16 +133,38 @@ impl MeetingHostShell {
             .py_3()
             .bg(rgb(0x050912));
 
-        if self.chat_messages.is_empty() {
+        if filtered_messages.is_empty() {
             message_stream = message_stream.child(
                 div()
                     .px_4()
                     .py_3()
                     .text_sm()
                     .text_color(rgb(0x7b8798))
-                    .child("暂无消息，连接后会显示实时会话记录。"),
+                    .child(if hidden_debug_message_count > 0 {
+                        "当前只显示用户对话消息，可在设置中开启 DEBUG 日志"
+                    } else {
+                        "暂无消息，连接后会显示实时会话记录。"
+                    }),
             );
         } else {
+            if hidden_debug_message_count > 0 {
+                message_stream = message_stream.child(
+                    div()
+                        .mx_4()
+                        .mb_2()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(0x1f2a3d))
+                        .bg(rgb(0x0c1421))
+                        .child(div().text_xs().text_color(rgb(0x7f8ca3)).child(format!(
+                            "已隐藏 {} 条 DEBUG 日志，可在设置中开启",
+                            hidden_debug_message_count
+                        ))),
+                );
+            }
+
             if hidden_message_count > 0 {
                 let view = cx.entity().downgrade();
                 message_stream = message_stream.child(
@@ -169,16 +201,11 @@ impl MeetingHostShell {
             }
 
             message_stream = message_stream.children(
-                self.chat_messages[..visible_message_count]
-                    .iter()
-                    .rev()
-                    .enumerate()
-                    .map(|(display_index, message)| {
-                        let message_index = visible_message_count
-                            .saturating_sub(display_index)
-                            .saturating_sub(1);
-                        self.render_chat_message(message_index, message, cx)
-                    }),
+                filtered_messages[..visible_message_count].iter().rev().map(
+                    |(message_index, message)| {
+                        self.render_chat_message(*message_index, message, cx)
+                    },
+                ),
             );
         }
 

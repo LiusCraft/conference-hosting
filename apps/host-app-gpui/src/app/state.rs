@@ -31,6 +31,15 @@ pub(crate) enum ChatRole {
     Error,
 }
 
+impl ChatRole {
+    pub(crate) fn is_debug_log(self) -> bool {
+        matches!(
+            self,
+            ChatRole::System | ChatRole::Client | ChatRole::Tool | ChatRole::Trace
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ChatMessage {
     pub(crate) role: ChatRole,
